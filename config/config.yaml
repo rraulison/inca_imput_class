@@ -1,0 +1,144 @@
+experiment:
+  name: "imputacao_estadiamento_inca_2026"
+  random_seed: 42
+  n_sample: 10000
+
+data:
+  filepath: "data/raw/df_raw.parquet"
+  target_col: "ESTADIAM"
+  valid_classes: [0, 1, 2, 3, 4, 88]
+  exclude_classes: [99]
+  missing_threshold: 0.60
+  date_filter_col: "DATAPRICON"
+  year_min: 2013
+  year_max: 2023
+  high_cardinality_min_freq: 100
+
+  features_safe:
+    - ALCOOLIS
+    - BASDIAGSP
+    - BASMAIMP
+    - DIAGANT
+    - ESTADRES
+    - ESTCONJ
+    - EXDIAG
+    - HISTFAMC
+    - IDADE
+    - INSTRUC
+    - LATERALI
+    - LOCALNAS
+    - MAISUMTU
+    - ORIENC
+    - RACACOR
+    - SEXO
+    - TABAGISM
+
+  features_high_cardinality:
+    - LOCTUDET
+    - LOCTUPRI
+    - TIPOHIST
+
+  num_cols:
+    - IDADE
+
+  features_exclude:
+    - ANOPRIDI
+    - ANTRI
+    - CLIATEN
+    - CLITRAT
+    - CNES
+    - DATAINITRT
+    - DATAOBITO
+    - DATAPRICON
+    - DTPRICON
+    - DTDIAGNO
+    - DTINITRT
+    - DTTRIAGE
+    - ESTADIAG
+    - ESTDFIMT
+    - LOCTUPRO
+    - MUUH
+    - OCUPACAO
+    - OUTROESTA
+    - PROCEDEN
+    - TNM
+    - TPCASO
+    - UFUH
+    - VALOR_TOT
+
+cv:
+  n_outer_folds: 3
+  n_inner_folds: 3
+
+imputation:
+  imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest]
+  params:
+    knn_neighbors: 5
+    mice_max_iter: 10
+    missforest_max_iter: 5
+    missforest_n_estimators: 100
+    missforest_max_depth: 12
+    xgb_max_iter: 5
+    xgb_n_estimators: 100
+    xgb_max_depth: 6
+    xgb_learning_rate: 0.1
+
+classification:
+  classifiers: [XGBoost, CatBoost, cuML_RF, cuML_SVM]
+  svm_max_train_samples: null
+  tuning:
+    n_iter: 20
+    n_iter_svm: 10
+    n_iter_mlp: 10
+    scoring: "f1_weighted"
+  params:
+    XGBoost:
+      n_estimators: [100, 200, 300, 500]
+      max_depth: [3, 5, 7, 10]
+      learning_rate: [0.01, 0.05, 0.1, 0.2]
+      subsample: [0.6, 0.8, 1.0]
+      colsample_bytree: [0.6, 0.8, 1.0]
+      min_child_weight: [1, 3, 5, 7]
+      gamma: [0, 0.1, 0.3]
+      reg_alpha: [0, 0.01, 0.1]
+      reg_lambda: [1, 1.5, 2]
+    CatBoost:
+      iterations: [200, 400, 600]
+      depth: [4, 6, 8, 10]
+      learning_rate: [0.01, 0.05, 0.1]
+      l2_leaf_reg: [1, 3, 5, 9]
+      subsample: [0.7, 0.85, 1.0]
+      subsample: [0.7, 0.85, 1.0]
+    cuML_RF:
+      n_estimators: [200, 400, 600]
+      max_depth: [8, 12, 16, 20]
+      max_features: ["sqrt", "log2", 1.0]
+      n_bins: [64, 128]
+    cuML_SVM:
+      C: [0.01, 0.1, 1, 10, 100]
+      kernel: ["rbf"]
+      gamma: ["scale", "auto"]
+    cuML_MLP:
+      hidden_layer_sizes: [[256, 128], [512, 256], [256, 256, 128]]
+      alpha: [0.0001, 0.001, 0.01]
+      learning_rate_init: [0.0005, 0.001, 0.005]
+      batch_size: [256, 512, 1024]
+      max_iter: [200, 300]
+
+metrics:
+  average: "weighted"
+  auc_multi_class: "ovr"
+
+paths:
+  raw_data: "data/raw"
+  processed_data: "data/processed"
+  imputed_data: "data/imputed"
+  results_raw: "results/raw"
+  results_tables: "results/tables"
+  results_figures: "results/figures"
+
+hardware:
+  use_gpu: true
+  gpu_device: "cuda"
+  gpu_id: 0
+  svm_cache_mb: 2000

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""
+Pipeline: Imputation x Classification for oncology staging.
+Data source: SisRHC/INCA.
+
+Usage:
+    python main.py
+    python main.py --step prepare
+    python main.py --step impute
+    python main.py --step classify
+    python main.py --step analyze
+    python main.py --step classify --classifier XGBoost
+    python main.py --step impute --imputer MICE_XGBoost
+"""
+
+import argparse
+import logging
+import os
+import platform
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import warnings
+
+# Suppress RAPIDS cuML SVC probability warnings
+warnings.filterwarnings("ignore", message="Random state is currently ignored by probabilistic SVC")
+
+
+def setup_logging():
+    Path("results/raw").mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("results/raw/experiment.log", mode="a", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+    return logging.getLogger(__name__)
+
+
+def set_seed(seed=42):
+    import random
+
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def save_environment():
+    Path("results/raw").mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(["pip", "freeze"], capture_output=True, text=True, timeout=60)
+        (Path("results/raw") / "pip_freeze.txt").write_text(result.stdout, encoding="utf-8")
+    except Exception:
+        pass
+
+    import pandas as pd
+    import scipy
+    import sklearn
+    import xgboost
+
+    env = {
+        "python": platform.python_version(),
+        "os": platform.platform(),
+        "numpy": np.__version__,
+        "pandas": pd.__version__,
+        "sklearn": sklearn.__version__,
+        "xgboost": xgboost.__version__,
+        "scipy": scipy.__version__,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    try:
+        import catboost
+
+        env["catboost"] = catboost.__version__
+    except Exception:
+        env["catboost"] = "not_installed"
+
+    try:
+        import cupy
+
+        env["cupy"] = cupy.__version__
+    except Exception:
+        env["cupy"] = "not_installed"
+
+    try:
+        import cuml
+
+        env["cuml"] = cuml.__version__
+    except Exception:
+        env["cuml"] = "not_installed"
+
+    return env
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pipeline Imputation x Classification")
+    parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, all")
+    parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument("--data", default=None, help="Raw CSV path")
+    parser.add_argument("--imputer", default=None, help="Filter to one imputer")
+    parser.add_argument("--classifier", default=None, help="Filter to one classifier")
+    args = parser.parse_args()
+
+    log = setup_logging()
+    steps = args.step.lower().split(",")
+    run_all = "all" in steps
+
+    from src.config_loader import load_config
+
+    cfg = load_config(args.config)
+    set_seed(cfg["experiment"]["random_seed"])
+
+    log.info("=" * 58)
+    log.info(" Oncology staging pipeline (imputation x classification) ")
+    log.info("=" * 58)
+
+    env = save_environment()
+    for key, value in env.items():
+        log.info("%s: %s", key, value)
+
+    if run_all or "prepare" in steps:
+        log.info("STEP 1 - PREPARE")
+        import pandas as pd
+
+        from src.data_preparation import prepare_data
+
+        data_path = args.data or cfg["data"]["filepath"]
+        data_path_obj = Path(data_path)
+        suffix = data_path_obj.suffix.lower()
+
+        if suffix == ".parquet":
+            df = pd.read_parquet(data_path_obj)
+        elif suffix in {".csv", ".txt"}:
+            try:
+                df = pd.read_csv(data_path_obj, low_memory=False, encoding="utf-8")
+            except UnicodeDecodeError:
+                df = pd.read_csv(data_path_obj, low_memory=False, encoding="latin1")
+        else:
+            raise ValueError(
+                f"Unsupported input format for '{data_path_obj}'. Use .parquet, .csv or .txt."
+            )
+        prepare_data(df, args.config)
+        del df
+
+    if run_all or "impute" in steps:
+        log.info("STEP 2 - IMPUTE")
+        from src.run_imputation import run_imputation
+
+        filter_imputers = [args.imputer] if args.imputer else None
+        run_imputation(args.config, filter_imputers=filter_imputers)
+
+    if run_all or "classify" in steps:
+        log.info("STEP 3 - CLASSIFY")
+        from src.run_classification import run_classification
+
+        filter_imputers = [args.imputer] if args.imputer else None
+        filter_classifiers = [args.classifier] if args.classifier else None
+        run_classification(
+            args.config,
+            filter_imputers=filter_imputers,
+            filter_classifiers=filter_classifiers,
+        )
+
+    if run_all or "analyze" in steps:
+        log.info("STEP 4 - ANALYZE")
+        from src.run_analysis import run_analysis
+
+        run_analysis(args.config)
+
+    log.info("Completed at: %s", datetime.now().isoformat())
+
+
+if __name__ == "__main__":
+    main()

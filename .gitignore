@@ -1,0 +1,39 @@
+# Strict Whitelist Approach for Source Code & Figures Only
+
+# Ignore everything by default
+*
+
+# Allow directories so we can descend into them
+!*/
+
+# Allow specific extensions (Source Code & Essential Config)
+!*.py
+!*.png
+!*.yaml
+!*.yml
+!*.md
+!*.txt
+!LICENSE*
+!Makefile
+!Dockerfile
+!requirements.txt
+!.gitignore
+
+# Explicitly Ignore Data & Artifacts (Double verify)
+*.parquet
+*.pdf
+*.cbm
+*.csv
+*.json
+*.log
+*.pkl
+*.gz
+*.zip
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.ipynb_checkpoints/
+results/raw/
+results/tables/
+# Allow results/figures/ (since .png is whitelisted globally, but figures dir must be traversable)
