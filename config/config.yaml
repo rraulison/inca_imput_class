@@ -1,7 +1,7 @@
 experiment:
   name: "imputacao_estadiamento_inca_2026"
   random_seed: 42
-  n_sample: 10000
+  n_sample: 100000
 
 data:
   filepath: "data/raw/df_raw.parquet"
@@ -15,55 +15,59 @@ data:
   high_cardinality_min_freq: 100
 
   features_safe:
-    - ALCOOLIS
-    - BASDIAGSP
-    - BASMAIMP
-    - DIAGANT
-    - ESTADRES
-    - ESTCONJ
-    - EXDIAG
-    - HISTFAMC
-    - IDADE
-    - INSTRUC
-    - LATERALI
-    - LOCALNAS
-    - MAISUMTU
-    - ORIENC
-    - RACACOR
     - SEXO
+    - IDADE
+    - LOCALNAS
+    - RACACOR
+    - INSTRUC
+    - CLIATEN
+    - HISTFAMC
+    - ALCOOLIS
     - TABAGISM
-
-  features_high_cardinality:
+    - ESTADRES
+    - PROCEDEN
+    - ANOPRIDI
+    - ORIENC
+    - ESTCONJ
+    - ANTRI
+    - DTPRICON
+    - DIAGANT
     - LOCTUDET
     - LOCTUPRI
-    - TIPOHIST
+    - LATERALI
+    - LOCTUPRO
+    - MAISUMTU
+    - CNES
+    - UFUH
+    - MUUH
+    - OCUPACAO
+
+  features_high_cardinality:
+    - PROCEDEN
+    - LOCTUPRI
+    - LOCTUPRO
+    - OCUPACAO
+    - CNES
+    - MUUH
+    - ANTRI
+    - ANOPRIDI
 
   num_cols:
     - IDADE
 
   features_exclude:
-    - ANOPRIDI
-    - ANTRI
-    - CLIATEN
     - CLITRAT
-    - CNES
     - DATAINITRT
     - DATAOBITO
     - DATAPRICON
-    - DTPRICON
     - DTDIAGNO
     - DTINITRT
     - DTTRIAGE
     - ESTADIAG
     - ESTDFIMT
-    - LOCTUPRO
-    - MUUH
-    - OCUPACAO
     - OUTROESTA
-    - PROCEDEN
     - TNM
     - TPCASO
-    - UFUH
     - VALOR_TOT
 
 cv:
@@ -71,9 +75,10 @@ cv:
   n_inner_folds: 3
 
 imputation:
-  imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest]
+  imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest, "None"]
   params:
     knn_neighbors: 5
+    knn_max_fit_samples: 30000
     mice_max_iter: 10
     missforest_max_iter: 5
     missforest_n_estimators: 100
@@ -102,13 +107,6 @@ classification:
       gamma: [0, 0.1, 0.3]
       reg_alpha: [0, 0.01, 0.1]
       reg_lambda: [1, 1.5, 2]
-    CatBoost:
-      iterations: [200, 400, 600]
-      depth: [4, 6, 8, 10]
-      learning_rate: [0.01, 0.05, 0.1]
-      l2_leaf_reg: [1, 3, 5, 9]
-      subsample: [0.7, 0.85, 1.0]
-      subsample: [0.7, 0.85, 1.0]
     cuML_RF:
       n_estimators: [200, 400, 600]
       max_depth: [8, 12, 16, 20]
@@ -118,12 +116,6 @@ classification:
       C: [0.01, 0.1, 1, 10, 100]
       kernel: ["rbf"]
       gamma: ["scale", "auto"]
-    cuML_MLP:
-      hidden_layer_sizes: [[256, 128], [512, 256], [256, 256, 128]]
-      alpha: [0.0001, 0.001, 0.01]
-      learning_rate_init: [0.0005, 0.001, 0.005]
-      batch_size: [256, 512, 1024]
-      max_iter: [200, 300]
 
 metrics:
   average: "weighted"

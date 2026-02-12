@@ -50,6 +50,7 @@ class CategoricalRounder(BaseEstimator, TransformerMixin):
         self.valid_values_list = valid_values_list
 
     def fit(self, X, y=None):
+        self._is_fitted = True
         return self
 
     def transform(self, X):
@@ -58,6 +59,9 @@ class CategoricalRounder(BaseEstimator, TransformerMixin):
             if len(valid) > 0:
                 X[:, idx] = np.clip(np.round(X[:, idx]), valid.min(), valid.max())
         return X
+
+    def __sklearn_is_fitted__(self):
+        return getattr(self, "_is_fitted", False)
 
 
 class CuMLRFRegressorAdapter(BaseEstimator, RegressorMixin):
@@ -100,6 +104,53 @@ class SafeColumnTransformer(ColumnTransformer):
     def transform(self, X):
         out = super().transform(X)
         return np.asarray(out)
+
+
+class Float32Caster(BaseEstimator, TransformerMixin):
+    """Cast arrays/dataframes to float32 to reduce memory and distance costs."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return np.asarray(X, dtype=np.float32)
+
+
+class SubsampledKNNImputer(BaseEstimator, TransformerMixin):
+    """KNNImputer wrapper that can fit on a random subset for scalability."""
+
+    def __init__(self, n_neighbors=5, weights="uniform", metric="nan_euclidean", max_fit_samples=None, random_state=42):
+        self.n_neighbors = n_neighbors
+        self.weights = weights
+        self.metric = metric
+        self.max_fit_samples = max_fit_samples
+        self.random_state = random_state
+        self.imputer_ = None
+        self._fit_rows_ = None
+
+    def fit(self, X, y=None):
+        X_arr = np.asarray(X)
+        n_rows = X_arr.shape[0]
+        X_fit = X_arr
+
+        if self.max_fit_samples is not None and self.max_fit_samples > 0 and n_rows > self.max_fit_samples:
+            rng = np.random.default_rng(self.random_state)
+            idx = rng.choice(n_rows, size=self.max_fit_samples, replace=False)
+            X_fit = X_arr[idx]
+            self._fit_rows_ = int(self.max_fit_samples)
+        else:
+            self._fit_rows_ = int(n_rows)
+
+        self.imputer_ = KNNImputer(
+            n_neighbors=self.n_neighbors,
+            weights=self.weights,
+            metric=self.metric,
+        )
+        self.imputer_.fit(X_fit)
+        return self
+
+    def transform(self, X):
+        return self.imputer_.transform(np.asarray(X))
 
 
 def _build_missforest_estimator(cfg):
@@ -159,12 +210,15 @@ def _build_imputers(num_cols, cat_cols, valid_values, cfg):
 
     imputers["kNN"] = Pipeline(
         [
+            ("float32", Float32Caster()),
             (
                 "imputer",
-                KNNImputer(
+                SubsampledKNNImputer(
                     n_neighbors=p["knn_neighbors"],
                     weights="uniform",
                     metric="nan_euclidean",
+                    max_fit_samples=p.get("knn_max_fit_samples"),
+                    random_state=seed,
                 ),
             ),
             ("rounder", clone(rounder)),
@@ -291,6 +345,13 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
     tempos_path = res_dir / "tempos_imputacao.json"
     tempos = json.load(open(tempos_path, "r", encoding="utf-8")) if tempos_path.exists() else {}
 
+    imputers["None"] = None  # Placeholder for native handling
+    if filter_imputers:
+        imputers = OrderedDict((k, v) for k, v in imputers.items() if k in filter_imputers)
+
+    tempos_path = res_dir / "tempos_imputacao.json"
+    tempos = json.load(open(tempos_path, "r", encoding="utf-8")) if tempos_path.exists() else {}
+
     for imp_name, imputer in imputers.items():
         log.info("%s", "=" * 58)
         log.info("Imputer: %s", imp_name)
@@ -308,58 +369,57 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
 
             X_tr = X.iloc[tr_idx].copy()
             X_te = X.iloc[te_idx].copy()
+            log.info("Fold %d start | train=%d test=%d", fold, len(tr_idx), len(te_idx))
 
-            try:
-                t0 = time.time()
-                imp_clone = clone(imputer)
-                imp_clone.fit(X_tr)
-                t_fit = time.time() - t0
+            if imp_name == "None":
+                log.info("Imputer is None - skipping imputation for fold %d", fold)
+                t_fit, t_tr, t_te = 0.0, 0.0, 0.0
+                # Directly save raw splits with NaNs
+                pd.DataFrame(X_tr, columns=all_cols).to_parquet(
+                    out_dir / f"{imp_name}_fold{fold}_train.parquet",
+                    index=False,
+                )
+                pd.DataFrame(X_te, columns=all_cols).to_parquet(
+                    out_dir / f"{imp_name}_fold{fold}_test.parquet",
+                    index=False,
+                )
+            else:
+                try:
+                    t0 = time.time()
+                    imp_clone = clone(imputer)
+                    imp_clone.fit(X_tr)
+                    t_fit = time.time() - t0
 
-                t0 = time.time()
-                X_tr_imp = imp_clone.transform(X_tr)
-                t_tr = time.time() - t0
+                    t0 = time.time()
+                    X_tr_imp = imp_clone.transform(X_tr)
+                    t_tr = time.time() - t0
 
-                t0 = time.time()
-                X_te_imp = imp_clone.transform(X_te)
-                t_te = time.time() - t0
-            except Exception as e:
-                log.error("Fold %d failed for %s: %s", fold, imp_name, e)
-                tempos[imp_name][str(fold)] = {"error": str(e)}
-                continue
+                    t0 = time.time()
+                    X_te_imp = imp_clone.transform(X_te)
+                    t_te = time.time() - t0
+                except Exception as e:
+                    log.error("Fold %d failed for %s: %s", fold, imp_name, e)
+                    tempos[imp_name][str(fold)] = {"error": str(e)}
+                    continue
 
-            for arr, split_name in ((X_tr_imp, "train"), (X_te_imp, "test")):
-                n_nan = int(np.isnan(arr).sum())
-                if n_nan > 0:
-                    log.warning("%s fold %d has %d residual NaN, filling with 0", split_name, fold, n_nan)
+                for arr, split_name in ((X_tr_imp, "train"), (X_te_imp, "test")):
+                    n_nan = int(np.isnan(arr).sum())
+                    if n_nan > 0:
+                        log.warning("%s fold %d has %d residual NaN, filling with 0", split_name, fold, n_nan)
 
-            X_tr_imp = np.nan_to_num(X_tr_imp, nan=0.0)
-            X_te_imp = np.nan_to_num(X_te_imp, nan=0.0)
+                X_tr_imp = np.nan_to_num(X_tr_imp, nan=0.0)
+                X_te_imp = np.nan_to_num(X_te_imp, nan=0.0)
 
-            pd.DataFrame(X_tr_imp, columns=all_cols).to_parquet(
-                out_dir / f"{imp_name}_fold{fold}_train.parquet",
-                index=False,
-            )
-            pd.DataFrame(X_te_imp, columns=all_cols).to_parquet(
-                out_dir / f"{imp_name}_fold{fold}_test.parquet",
-                index=False,
-            )
-
-            tempos[imp_name][str(fold)] = {
-                "time_fit": round(t_fit, 3),
-                "time_transform_train": round(t_tr, 3),
-                "time_transform_test": round(t_te, 3),
-                "time_total": round(t_fit + t_tr + t_te, 3),
-            }
-            log.info(
-                "Fold %d timing | fit=%s, transform=%s+%s",
-                fold,
-                _fmt_time(t_fit),
-                _fmt_time(t_tr),
-                _fmt_time(t_te),
-            )
-
-            del imp_clone, X_tr, X_te, X_tr_imp, X_te_imp
-            gc.collect()
+                pd.DataFrame(X_tr_imp, columns=all_cols).to_parquet(
+                    out_dir / f"{imp_name}_fold{fold}_train.parquet",
+                    index=False,
+                )
+                pd.DataFrame(X_te_imp, columns=all_cols).to_parquet(
+                    out_dir / f"{imp_name}_fold{fold}_test.parquet",
+                    index=False,
+                )
+                del imp_clone, X_tr_imp, X_te_imp
+                gc.collect()
 
         with open(tempos_path, "w", encoding="utf-8") as f:
             json.dump(tempos, f, indent=2)

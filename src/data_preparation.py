@@ -162,7 +162,9 @@ def prepare_data(df, config_path="config/config.yaml"):
     log.info("Target filter: %s -> %s", f"{n0:,}", f"{len(df):,}")
     meta["n_after_target_filter"] = len(df)
 
-    features = data_cfg["features_safe"] + data_cfg["features_high_cardinality"]
+    # Keep insertion order while preventing duplicated columns when a feature is
+    # listed in both safe and high-cardinality config groups.
+    features = list(dict.fromkeys(data_cfg["features_safe"] + data_cfg["features_high_cardinality"]))
     features = [f for f in features if f in df.columns]
     df = df[features + [target_col]].copy()
     log.info("Selected features: %d", len(features))

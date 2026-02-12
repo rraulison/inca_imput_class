@@ -9,6 +9,8 @@ Usage:
     python main.py --step impute
     python main.py --step classify
     python main.py --step analyze
+    python main.py --runtime-mode hybrid --n-sample 100000
+    python main.py --runtime-mode fast --n-sample 100000
     python main.py --step classify --classifier XGBoost
     python main.py --step impute --imputer MICE_XGBoost
 """
@@ -99,6 +101,31 @@ def save_environment():
     return env
 
 
+def apply_runtime_overrides(cfg, args, log):
+    mode = args.runtime_mode.lower()
+    runtime_cfg = cfg.setdefault("classification", {}).setdefault("runtime", {})
+    runtime_cfg["mode"] = mode
+
+    if args.tune_max_samples is not None:
+        runtime_cfg["tune_max_samples"] = int(args.tune_max_samples)
+    elif mode == "hybrid":
+        runtime_cfg["tune_max_samples"] = 20000
+    else:
+        runtime_cfg["tune_max_samples"] = None
+
+    if args.n_sample is not None:
+        cfg["experiment"]["n_sample"] = int(args.n_sample)
+    elif mode in {"hybrid", "fast"} and int(cfg["experiment"].get("n_sample", 0)) < 100000:
+        cfg["experiment"]["n_sample"] = 100000
+
+    log.info(
+        "Runtime mode: %s | n_sample=%s | tune_max_samples=%s",
+        mode,
+        cfg["experiment"]["n_sample"],
+        runtime_cfg.get("tune_max_samples"),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Imputation x Classification")
     parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, all")
@@ -106,6 +133,24 @@ def main():
     parser.add_argument("--data", default=None, help="Raw CSV path")
     parser.add_argument("--imputer", default=None, help="Filter to one imputer")
     parser.add_argument("--classifier", default=None, help="Filter to one classifier")
+    parser.add_argument(
+        "--runtime-mode",
+        default="default",
+        choices=["default", "hybrid", "fast"],
+        help="default=full tuning, hybrid=light tuning on subset, fast=fixed params without tuning",
+    )
+    parser.add_argument(
+        "--n-sample",
+        type=int,
+        default=None,
+        help="Override experiment.n_sample (e.g., 100000)",
+    )
+    parser.add_argument(
+        "--tune-max-samples",
+        type=int,
+        default=None,
+        help="Max train samples for tuning in hybrid mode (default: 20000)",
+    )
     args = parser.parse_args()
 
     log = setup_logging()
@@ -115,6 +160,7 @@ def main():
     from src.config_loader import load_config
 
     cfg = load_config(args.config)
+    apply_runtime_overrides(cfg, args, log)
     set_seed(cfg["experiment"]["random_seed"])
 
     log.info("=" * 58)

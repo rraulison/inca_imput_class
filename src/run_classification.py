@@ -32,7 +32,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import ParameterSampler, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import ParameterSampler, RandomizedSearchCV, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.utils.class_weight import compute_sample_weight
 from tqdm import tqdm
@@ -67,8 +67,100 @@ except Exception:  # pragma: no cover - optional dependency
 
 log = logging.getLogger(__name__)
 
-IMPUTER_NAMES = ["Media", "Mediana", "kNN", "MICE_XGBoost", "MICE", "MissForest"]
+IMPUTER_NAMES = ["Media", "Mediana", "kNN", "MICE_XGBoost", "MICE", "MissForest", "None"]
 CLF_ORDER = ["XGBoost", "CatBoost", "cuML_RF", "cuML_SVM", "cuML_MLP"]
+
+FAST_FIXED_PARAMS = {
+    "XGBoost": {
+        "colsample_bytree": 0.6,
+        "gamma": 0.3,
+        "learning_rate": 0.05,
+        "max_depth": 10,
+        "min_child_weight": 1,
+        "n_estimators": 100,
+        "reg_alpha": 0,
+        "reg_lambda": 1,
+        "subsample": 1.0,
+    },
+    "CatBoost": {
+        "depth": 6,
+        "iterations": 600,
+        "l2_leaf_reg": 3,
+        "learning_rate": 0.1,
+        "subsample": 0.7,
+    },
+    "cuML_RF": {
+        "max_depth": 8,
+        "max_features": "sqrt",
+        "n_bins": 128,
+        "n_estimators": 400,
+    },
+    "cuML_SVM": {
+        "C": 10,
+        "gamma": "auto",
+        "kernel": "rbf",
+    },
+}
+
+HYBRID_PARAM_SPACE = {
+    "XGBoost": {
+        "n_estimators": [100, 200],
+        "max_depth": [7, 10],
+        "learning_rate": [0.05, 0.1],
+        "subsample": [0.8, 1.0],
+        "colsample_bytree": [0.6, 0.8],
+        "min_child_weight": [1, 3],
+        "gamma": [0.1, 0.3],
+        "reg_alpha": [0, 0.1],
+        "reg_lambda": [1, 2],
+    },
+    "CatBoost": {
+        "iterations": [400, 600],
+        "depth": [6, 8],
+        "learning_rate": [0.05, 0.1],
+        "l2_leaf_reg": [1, 3],
+        "subsample": [0.7, 0.85],
+    },
+    "cuML_RF": {
+        "n_estimators": [200, 400],
+        "max_depth": [8, 12],
+        "max_features": ["sqrt", "log2"],
+        "n_bins": [64, 128],
+    },
+    "cuML_SVM": {
+        "C": [1, 10],
+        "kernel": ["rbf"],
+        "gamma": ["scale", "auto"],
+    },
+}
+
+DEFAULT_PARAM_SPACE = {
+    **HYBRID_PARAM_SPACE,
+    "cuML_MLP": {
+        "hidden_layer_sizes": [(256, 128), (128, 64)],
+        "alpha": [0.0001, 0.001],
+        "learning_rate_init": [0.001, 0.01],
+        "batch_size": [256, 512],
+        "max_iter": [200, 300],
+    },
+}
+
+
+def _resolve_classifier_params(cfg):
+    cfg_params = cfg.get("classification", {}).get("params", {}) or {}
+    resolved = {}
+    for name in CLF_ORDER:
+        param_space = cfg_params.get(name)
+        if isinstance(param_space, dict):
+            resolved[name] = param_space
+        else:
+            resolved[name] = DEFAULT_PARAM_SPACE.get(name, {})
+            log.warning("classification.params.%s missing; using built-in defaults.", name)
+    return resolved
+
+
+def _n_iter_for_space(base_n_iter, param_space):
+    return int(base_n_iter) if param_space else 1
 
 
 def _to_numpy(x):
@@ -291,7 +383,7 @@ def _build_classifiers(cfg):
     gpu_device = cfg["hardware"].get("gpu_device", "cuda")
     gpu_id = cfg["hardware"].get("gpu_id", 0)
 
-    params = cfg["classification"]["params"]
+    params = _resolve_classifier_params(cfg)
     n_iter = cfg["classification"]["tuning"]["n_iter"]
     n_iter_svm = cfg["classification"]["tuning"].get("n_iter_svm", n_iter)
     n_iter_mlp = cfg["classification"]["tuning"].get("n_iter_mlp", n_iter)
@@ -330,7 +422,7 @@ def _build_classifiers(cfg):
                 ),
                 "params": params["XGBoost"],
                 "needs_scaling": False,
-                "n_iter": n_iter,
+                "n_iter": _n_iter_for_space(n_iter, params["XGBoost"]),
                 "search_n_jobs": 1,
                 "engine": "sklearn",
                 "available": True,
@@ -339,7 +431,7 @@ def _build_classifiers(cfg):
                 "model": cat_model,
                 "params": params["CatBoost"],
                 "needs_scaling": False,
-                "n_iter": n_iter,
+                "n_iter": _n_iter_for_space(n_iter, params["CatBoost"]),
                 "search_n_jobs": 1,
                 "engine": "sklearn",
                 "available": cat_available,
@@ -349,7 +441,7 @@ def _build_classifiers(cfg):
                 "model": CuMLRFWrapper(random_state=seed),
                 "params": params["cuML_RF"],
                 "needs_scaling": False,
-                "n_iter": n_iter,
+                "n_iter": _n_iter_for_space(n_iter, params["cuML_RF"]),
                 "search_n_jobs": 1,
                 "engine": "cuml",
                 "available": deps["cupy"] and deps["cuml_rf"],
@@ -363,7 +455,7 @@ def _build_classifiers(cfg):
                 ),
                 "params": params["cuML_SVM"],
                 "needs_scaling": True,
-                "n_iter": n_iter_svm,
+                "n_iter": _n_iter_for_space(n_iter_svm, params["cuML_SVM"]),
                 "search_n_jobs": 1,
                 "engine": "cuml",
                 "available": deps["cupy"] and deps["cuml_svm"],
@@ -373,7 +465,7 @@ def _build_classifiers(cfg):
                 "model": CuMLMLPWrapper(random_state=seed),
                 "params": params["cuML_MLP"],
                 "needs_scaling": True,
-                "n_iter": n_iter_mlp,
+                "n_iter": _n_iter_for_space(n_iter_mlp, params["cuML_MLP"]),
                 "search_n_jobs": 1,
                 "engine": "cuml",
                 "available": deps["cupy"] and deps["cuml_mlp"],
@@ -441,7 +533,90 @@ def _fmt_time(seconds):
     return f"{seconds / 3600:.1f}h"
 
 
-def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X, y, seed):
+def _normalize_runtime_mode(mode):
+    mode = str(mode or "default").lower()
+    return mode if mode in {"default", "hybrid", "fast"} else "default"
+
+
+def _runtime_setup(cfg, classifiers):
+    runtime_cfg = cfg.get("classification", {}).get("runtime", {})
+    mode = _normalize_runtime_mode(runtime_cfg.get("mode", "default"))
+    tune_max_samples = runtime_cfg.get("tune_max_samples")
+    tune_max_samples = int(tune_max_samples) if tune_max_samples else None
+
+    if mode == "hybrid" and not tune_max_samples:
+        tune_max_samples = 20000
+
+    base_inner = int(cfg["cv"]["n_inner_folds"])
+    if mode in {"hybrid", "fast"}:
+        inner_folds = 2
+    else:
+        inner_folds = max(2, base_inner)
+
+    for name, clf_cfg in classifiers.items():
+        clf_cfg["fixed_params"] = {}
+        if mode == "hybrid":
+            if name in HYBRID_PARAM_SPACE:
+                clf_cfg["params"] = HYBRID_PARAM_SPACE[name]
+            if name == "XGBoost":
+                clf_cfg["n_iter"] = min(int(clf_cfg["n_iter"]), 8)
+            elif name == "CatBoost":
+                clf_cfg["n_iter"] = min(int(clf_cfg["n_iter"]), 6)
+            else:
+                clf_cfg["n_iter"] = min(int(clf_cfg["n_iter"]), 4)
+        elif mode == "fast":
+            clf_cfg["n_iter"] = 1
+            clf_cfg["fixed_params"] = FAST_FIXED_PARAMS.get(name, {})
+
+    return mode, tune_max_samples, inner_folds
+
+
+def _ordered_config_classifiers(cfg):
+    configured = cfg.get("classification", {}).get("classifiers", CLF_ORDER)
+    front = [name for name in CLF_ORDER if name in configured]
+    tail = [name for name in configured if name not in front]
+    return front + tail
+
+
+def _fit_with_optional_weights(model, X, y, sample_weight=None):
+    if sample_weight is None:
+        model.fit(X, y)
+    else:
+        model.fit(X, y, sample_weight=sample_weight)
+
+
+def _safe_inner_splits(y, requested):
+    y = _to_numpy(y).astype(int)
+    _, counts = np.unique(y, return_counts=True)
+    if len(counts) == 0 or int(counts.min()) < 2:
+        return None
+    return max(2, min(int(requested), int(counts.min())))
+
+
+def _stratified_tuning_subset(X, y, sample_weight, max_samples, seed):
+    if not max_samples or len(y) <= max_samples:
+        return X, y, sample_weight, False
+
+    idx = np.arange(len(y))
+    try:
+        sub_idx, _ = train_test_split(
+            idx,
+            train_size=max_samples,
+            stratify=y,
+            random_state=seed,
+        )
+    except Exception:
+        rng = np.random.RandomState(seed)
+        sub_idx = rng.choice(idx, size=max_samples, replace=False)
+
+    sub_idx = np.sort(sub_idx)
+    X_sub = X[sub_idx]
+    y_sub = y[sub_idx]
+    w_sub = None if sample_weight is None else np.asarray(sample_weight)[sub_idx]
+    return X_sub, y_sub, w_sub, True
+
+
+def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X, y, seed, refit_X=None, refit_y=None):
     search_estimator = clone(estimator)
     if hasattr(search_estimator, "probability") and hasattr(search_estimator, "set_params"):
         # Optimization: SVC probability=True is slow (internal CV).
@@ -480,7 +655,9 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
 
     best_estimator = clone(estimator)
     best_estimator.set_params(**best_params)
-    best_estimator.fit(X, y)
+    fit_X = X if refit_X is None else refit_X
+    fit_y = y if refit_y is None else refit_y
+    best_estimator.fit(fit_X, fit_y)
 
     return best_estimator, best_params, best_score
 
@@ -489,7 +666,6 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
     n_outer = cfg["cv"]["n_outer_folds"]
-    n_inner = cfg["cv"]["n_inner_folds"]
     scoring = cfg["classification"]["tuning"]["scoring"]
     svm_max = cfg["classification"].get("svm_max_train_samples") or 20000
 
@@ -517,16 +693,44 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     log.info("Available imputers: %s", available_imp)
 
     classifiers = _build_classifiers(cfg)
-    clf_names = filter_classifiers or CLF_ORDER
+    runtime_mode, tune_max_samples, n_inner = _runtime_setup(cfg, classifiers)
+    log.info(
+        "Classification mode=%s | inner_folds=%d | tune_max_samples=%s",
+        runtime_mode,
+        n_inner,
+        tune_max_samples,
+    )
+
+    clf_names = filter_classifiers or _ordered_config_classifiers(cfg)
     clf_names = [name for name in clf_names if name in classifiers]
 
-    ckpt_path = res_dir / "checkpoint_classification.json"
+    ckpt_suffix = "" if runtime_mode == "default" else f"_{runtime_mode}"
+    ckpt_path = res_dir / f"checkpoint_classification{ckpt_suffix}.json"
+    out_csv = res_dir / f"all_results{ckpt_suffix}.csv"
+    out_json = res_dir / f"all_results_detailed{ckpt_suffix}.json"
+
     if ckpt_path.exists():
         with open(ckpt_path, "r", encoding="utf-8") as f:
             ckpt = json.load(f)
-        completed = set(ckpt.get("completed", []))
-        all_results = ckpt.get("results", [])
-        log.info("Checkpoint loaded: %d completed combinations", len(completed))
+        raw_completed = set(ckpt.get("completed", []))
+        completed = set()
+        for key in raw_completed:
+            key = str(key)
+            parts = key.split("__", 1)
+            if parts[0] in {"default", "hybrid", "fast"}:
+                if parts[0] == runtime_mode:
+                    completed.add(key)
+            elif runtime_mode == "default":
+                completed.add(f"default__{key}")
+
+        all_results = []
+        for row in ckpt.get("results", []):
+            row_mode = row.get("runtime_mode", "default")
+            if row_mode == runtime_mode:
+                row["runtime_mode"] = row_mode
+                all_results.append(row)
+
+        log.info("Checkpoint loaded (%s): %d completed combinations", runtime_mode, len(completed))
     else:
         completed = set()
         all_results = []
@@ -536,7 +740,6 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
 
     total = len(available_imp) * len(clf_names) * n_outer
     pbar = tqdm(total=total, desc="Classification")
-    pbar.update(len(completed))
 
     for imp_name in available_imp:
         for fold in range(n_outer):
@@ -550,7 +753,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
             t_imp_transform = ti.get("time_transform_train", 0) + ti.get("time_transform_test", 0)
 
             for clf_name in clf_names:
-                key = f"{imp_name}__{fold}__{clf_name}"
+                key = f"{runtime_mode}__{imp_name}__{fold}__{clf_name}"
                 if key in completed:
                     pbar.update(1)
                     continue
@@ -560,6 +763,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                     err_msg = clf_cfg.get("error") or "Classifier dependencies unavailable."
                     log.error("%s fold%d %s: %s", imp_name, fold, clf_name, err_msg)
                     result = {
+                        "runtime_mode": runtime_mode,
                         "fold": fold,
                         "imputer": imp_name,
                         "classifier": clf_name,
@@ -570,6 +774,11 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                     pbar.update(1)
                     with open(ckpt_path, "w", encoding="utf-8") as f:
                         json.dump({"completed": list(completed), "results": _serialize(all_results)}, f)
+                    continue
+
+
+                if imp_name == "None" and clf_name not in {"XGBoost", "CatBoost"}:
+                    log.info("Skipping %s with imputer 'None' (does not support NaNs)", clf_name)
                     continue
 
                 if clf_cfg["needs_scaling"]:
@@ -592,44 +801,90 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                 if clf_name in {"XGBoost", "CatBoost"}:
                     sample_weight = compute_sample_weight("balanced", ytr)
 
-                inner_cv = StratifiedKFold(n_splits=n_inner, shuffle=True, random_state=seed)
-
                 try:
-                    t0 = time.time()
-                    if clf_cfg["engine"] == "cuml":
-                        best_model, best_params, best_score = _manual_random_search(
-                            estimator=clf_cfg["model"],
-                            param_distributions=clf_cfg["params"],
-                            n_iter=clf_cfg["n_iter"],
-                            cv=inner_cv,
-                            scoring=scoring,
-                            X=Xtr,
-                            y=ytr,
-                            seed=seed,
-                        )
+                    if runtime_mode == "fast":
+                        best_params = dict(clf_cfg.get("fixed_params", {}))
+                        best_model = clone(clf_cfg["model"])
+                        if best_params:
+                            best_model.set_params(**best_params)
+                        _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
+                        best_score = np.nan
+                        t_tuning = 0.0
                     else:
-                        search = RandomizedSearchCV(
-                            estimator=clone(clf_cfg["model"]),
-                            param_distributions=clf_cfg["params"],
-                            n_iter=clf_cfg["n_iter"],
-                            cv=inner_cv,
-                            scoring=scoring,
-                            random_state=seed,
-                            n_jobs=clf_cfg["search_n_jobs"],
-                            verbose=0,
-                            error_score="raise",
-                            refit=True,
-                        )
-                        if sample_weight is not None:
-                            search.fit(Xtr, ytr, sample_weight=sample_weight)
-                        else:
-                            search.fit(Xtr, ytr)
-                        best_model = search.best_estimator_
-                        best_params = search.best_params_
-                        best_score = search.best_score_
-                        del search
+                        X_tune, y_tune, w_tune, used_subset = Xtr, ytr, sample_weight, False
+                        if runtime_mode == "hybrid":
+                            tune_seed = seed + fold * 101 + sum(ord(ch) for ch in clf_name)
+                            X_tune, y_tune, w_tune, used_subset = _stratified_tuning_subset(
+                                Xtr,
+                                ytr,
+                                sample_weight,
+                                tune_max_samples,
+                                tune_seed,
+                            )
+                            if used_subset:
+                                log.info(
+                                    "%s fold%d %s: tuning subset %d/%d samples",
+                                    imp_name,
+                                    fold,
+                                    clf_name,
+                                    len(y_tune),
+                                    len(ytr),
+                                )
 
-                    t_tuning = time.time() - t0
+                        n_inner_eff = _safe_inner_splits(y_tune, n_inner)
+                        if n_inner_eff is None:
+                            best_params = dict(clf_cfg.get("fixed_params", {}))
+                            best_model = clone(clf_cfg["model"])
+                            if best_params:
+                                best_model.set_params(**best_params)
+                            _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
+                            best_score = np.nan
+                            t_tuning = 0.0
+                        else:
+                            inner_cv = StratifiedKFold(n_splits=n_inner_eff, shuffle=True, random_state=seed + fold)
+                            t0 = time.time()
+                            if clf_cfg["engine"] == "cuml":
+                                best_model, best_params, best_score = _manual_random_search(
+                                    estimator=clf_cfg["model"],
+                                    param_distributions=clf_cfg["params"],
+                                    n_iter=clf_cfg["n_iter"],
+                                    cv=inner_cv,
+                                    scoring=scoring,
+                                    X=X_tune,
+                                    y=y_tune,
+                                    seed=seed + fold,
+                                    refit_X=Xtr if used_subset else None,
+                                    refit_y=ytr if used_subset else None,
+                                )
+                            else:
+                                search = RandomizedSearchCV(
+                                    estimator=clone(clf_cfg["model"]),
+                                    param_distributions=clf_cfg["params"],
+                                    n_iter=clf_cfg["n_iter"],
+                                    cv=inner_cv,
+                                    scoring=scoring,
+                                    random_state=seed + fold,
+                                    n_jobs=clf_cfg["search_n_jobs"],
+                                    verbose=0,
+                                    error_score="raise",
+                                    refit=True,
+                                )
+                                if w_tune is not None:
+                                    search.fit(X_tune, y_tune, sample_weight=w_tune)
+                                else:
+                                    search.fit(X_tune, y_tune)
+
+                                best_params = search.best_params_
+                                best_score = search.best_score_
+                                if used_subset:
+                                    best_model = clone(clf_cfg["model"])
+                                    best_model.set_params(**best_params)
+                                    _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
+                                else:
+                                    best_model = search.best_estimator_
+                                del search
+
+                            t_tuning = time.time() - t0
 
                     t0 = time.time()
                     y_pred = _to_numpy(best_model.predict(Xte)).astype(int)
@@ -647,6 +902,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                     metrics = _compute_metrics(y_te.values, y_pred, y_prob, classes)
 
                     result = {
+                        "runtime_mode": runtime_mode,
                         "fold": fold,
                         "imputer": imp_name,
                         "classifier": clf_name,
@@ -682,6 +938,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                     log.error("%s fold%d %s failed: %s", imp_name, fold, clf_name, e)
                     traceback.print_exc()
                     result = {
+                        "runtime_mode": runtime_mode,
                         "fold": fold,
                         "imputer": imp_name,
                         "classifier": clf_name,
@@ -707,10 +964,22 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
         for r in all_results
     ]
     df = pd.DataFrame(flat)
-    df.to_csv(res_dir / "all_results.csv", index=False)
+    df.to_csv(out_csv, index=False)
 
-    with open(res_dir / "all_results_detailed.json", "w", encoding="utf-8") as f:
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump(_serialize(all_results), f, indent=2)
 
-    log.info("Classification finished. %d result rows saved.", len(df))
+    # Keep canonical outputs for downstream analysis.
+    if out_csv.name != "all_results.csv":
+        df.to_csv(res_dir / "all_results.csv", index=False)
+    if out_json.name != "all_results_detailed.json":
+        with open(res_dir / "all_results_detailed.json", "w", encoding="utf-8") as f:
+            json.dump(_serialize(all_results), f, indent=2)
+
+    log.info(
+        "Classification finished (%s). %d result rows saved to %s.",
+        runtime_mode,
+        len(df),
+        out_csv.name,
+    )
     return df
