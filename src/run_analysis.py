@@ -271,9 +271,6 @@ def _annotate_heatmap(ax, data, fmt=".4f", fontsize=10, fontweight="bold"):
 
             if fmt == "d":
                 text = f"{int(round(value))}"
-            elif fmt.endswith("%"):
-                precision = fmt[1:-1] if len(fmt) > 2 else ""
-                text = format(value, f"{precision}%")
             else:
                 text = format(value, fmt)
 
