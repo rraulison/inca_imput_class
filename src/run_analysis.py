@@ -6,6 +6,7 @@ Output: results/tables/ and results/figures/
 
 import json
 import logging
+from ast import literal_eval
 from itertools import combinations
 from pathlib import Path
 
@@ -254,6 +255,41 @@ def _plot_missing(mr, out_dir, threshold=0.60):
     _save_fig(fig, "missing_rates", out_dir)
 
 
+def _annotate_heatmap(ax, data, fmt=".4f", fontsize=10, fontweight="bold"):
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2 or arr.size == 0:
+        return
+
+    finite = arr[np.isfinite(arr)]
+    threshold = (finite.min() + finite.max()) / 2.0 if finite.size else 0.0
+
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            value = arr[i, j]
+            if not np.isfinite(value):
+                continue
+
+            if fmt == "d":
+                text = f"{int(round(value))}"
+            elif fmt.endswith("%"):
+                precision = fmt[1:-1] if len(fmt) > 2 else ""
+                text = format(value, f"{precision}%")
+            else:
+                text = format(value, fmt)
+
+            color = "white" if value > threshold else "#1a1a1a"
+            ax.text(
+                j + 0.5,
+                i + 0.5,
+                text,
+                ha="center",
+                va="center",
+                color=color,
+                fontsize=fontsize,
+                fontweight=fontweight,
+            )
+
+
 def _plot_heatmaps(summary, out_dir):
     metrics = {
         "accuracy_mean": "Acuracia",
@@ -273,13 +309,12 @@ def _plot_heatmaps(summary, out_dir):
         fig, ax = plt.subplots(figsize=(9, 6))
         sns.heatmap(
             pivot,
-            annot=True,
-            fmt=".4f",
+            annot=False,
             cmap="YlOrRd",
             ax=ax,
             linewidths=1,
-            annot_kws={"size": 10, "weight": "bold"},
         )
+        _annotate_heatmap(ax, pivot.values, fmt=".4f", fontsize=10, fontweight="bold")
         ax.set_title(f"{label} - Imputador x Classificador")
         ax.set_ylabel("Imputador")
         ax.tick_params(axis="y", rotation=0)
@@ -347,38 +382,81 @@ def _plot_timing(summary, out_dir):
     _save_fig(fig, "timing_stacked", out_dir)
 
 
+def _coerce_confusion_matrix(raw_cm, expected_classes=None):
+    cm_data = raw_cm
+    if isinstance(cm_data, str):
+        try:
+            cm_data = json.loads(cm_data)
+        except Exception:
+            cm_data = literal_eval(cm_data)
+
+    cm = np.asarray(cm_data)
+    cm = np.squeeze(cm)
+
+    if cm.ndim == 1:
+        size = cm.size
+        n = int(np.sqrt(size))
+        if n * n == size:
+            cm = cm.reshape(n, n)
+        elif expected_classes and size == expected_classes * expected_classes:
+            cm = cm.reshape(expected_classes, expected_classes)
+        else:
+            return None
+
+    if cm.ndim != 2:
+        return None
+
+    return cm.astype(int)
+
+
 def _plot_confusion(detailed, summary, out_dir, target_map):
     best = summary.loc[summary["f1_weighted_mean"].idxmax()]
     inv = {int(v): str(k) for k, v in target_map.items()}
 
-    cm = None
+    expected_classes = (max(inv.keys()) + 1) if inv else None
+    matrices = []
+
     for row in detailed:
         if (
             row.get("imputer") == best["imputer"]
             and row.get("classifier") == best["classifier"]
-            and row.get("fold") == 0
             and "confusion_matrix" in row
+            and not row.get("error")
         ):
-            cm = np.array(row["confusion_matrix"])
-            break
+            cm = _coerce_confusion_matrix(row["confusion_matrix"], expected_classes=expected_classes)
+            if cm is not None:
+                matrices.append(cm)
 
-    if cm is None:
+    if not matrices:
         return
 
-    labels = [inv.get(i, str(i)) for i in range(cm.shape[0])]
+    if expected_classes is None:
+        expected_classes = max(cm.shape[0] for cm in matrices)
+
+    exact = [cm for cm in matrices if cm.shape == (expected_classes, expected_classes)]
+    if exact:
+        cm = np.sum(exact, axis=0)
+    else:
+        base = max(matrices, key=lambda x: x.shape[0])
+        cm = np.zeros((expected_classes, expected_classes), dtype=int)
+        r = min(base.shape[0], expected_classes)
+        c = min(base.shape[1], expected_classes)
+        cm[:r, :c] = base[:r, :c]
+
+    labels = [inv.get(i, str(i)) for i in range(expected_classes)]
     cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
     cm_norm = np.nan_to_num(cm_norm)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels, ax=axes[0], linewidths=0.5)
+    sns.heatmap(cm, annot=False, cmap="Blues", xticklabels=labels, yticklabels=labels, ax=axes[0], linewidths=0.5)
+    _annotate_heatmap(axes[0], cm, fmt="d")
     axes[0].set_xlabel("Predicted")
     axes[0].set_ylabel("True")
     axes[0].set_title("Absolute")
 
     sns.heatmap(
         cm_norm,
-        annot=True,
-        fmt=".2%",
+        annot=False,
         cmap="Blues",
         xticklabels=labels,
         yticklabels=labels,
@@ -387,6 +465,7 @@ def _plot_confusion(detailed, summary, out_dir, target_map):
         vmin=0,
         vmax=1,
     )
+    _annotate_heatmap(axes[1], cm_norm, fmt=".2%")
     axes[1].set_xlabel("Predicted")
     axes[1].set_ylabel("True")
     axes[1].set_title("Normalized by class")
