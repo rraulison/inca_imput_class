@@ -67,8 +67,11 @@ except Exception:  # pragma: no cover - optional dependency
 
 log = logging.getLogger(__name__)
 
-IMPUTER_NAMES = ["Media", "Mediana", "kNN", "MICE_XGBoost", "MICE", "MissForest", "None"]
+MAIN_IMPUTER_NAMES = ["Media", "Mediana", "kNN", "MICE_XGBoost", "MICE", "MissForest"]
+NO_IMPUTER_NAME = "NoImpute"
+RAW_CATBOOST_IMPUTER = "RawSemEncoding"
 CLF_ORDER = ["XGBoost", "CatBoost", "cuML_RF", "cuML_SVM", "cuML_MLP"]
+CHECKPOINT_SCHEMA_VERSION = 2
 
 FAST_FIXED_PARAMS = {
     "XGBoost": {
@@ -578,11 +581,17 @@ def _ordered_config_classifiers(cfg):
     return front + tail
 
 
-def _fit_with_optional_weights(model, X, y, sample_weight=None):
-    if sample_weight is None:
-        model.fit(X, y)
-    else:
-        model.fit(X, y, sample_weight=sample_weight)
+def _take_rows(X, idx):
+    if isinstance(X, (pd.DataFrame, pd.Series)):
+        return X.iloc[idx]
+    return X[idx]
+
+
+def _fit_with_optional_weights(model, X, y, sample_weight=None, fit_kwargs=None):
+    kwargs = dict(fit_kwargs or {})
+    if sample_weight is not None:
+        kwargs["sample_weight"] = sample_weight
+    model.fit(X, y, **kwargs)
 
 
 def _safe_inner_splits(y, requested):
@@ -610,7 +619,7 @@ def _stratified_tuning_subset(X, y, sample_weight, max_samples, seed):
         sub_idx = rng.choice(idx, size=max_samples, replace=False)
 
     sub_idx = np.sort(sub_idx)
-    X_sub = X[sub_idx]
+    X_sub = _take_rows(X, sub_idx)
     y_sub = y[sub_idx]
     w_sub = None if sample_weight is None else np.asarray(sample_weight)[sub_idx]
     return X_sub, y_sub, w_sub, True
@@ -643,8 +652,14 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
         for tr_idx, va_idx in cv.split(X, y):
             est = clone(search_estimator)
             est.set_params(**params)
-            est.fit(X[tr_idx], y[tr_idx])
-            fold_scores.append(float(scorer(est, X[va_idx], y[va_idx])))
+            
+            X_tr_fold = _take_rows(X, tr_idx)
+            y_tr_fold = _take_rows(y, tr_idx)
+            X_va_fold = _take_rows(X, va_idx)
+            y_va_fold = _take_rows(y, va_idx)
+            
+            est.fit(X_tr_fold, y_tr_fold)
+            fold_scores.append(float(scorer(est, X_va_fold, y_va_fold)))
             del est
             gc.collect()
 
@@ -662,6 +677,214 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
     return best_estimator, best_params, best_score
 
 
+def _save_classification_checkpoint(ckpt_path, completed, all_results):
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "completed": list(completed),
+        "results": _serialize(all_results),
+    }
+    with open(ckpt_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def _evaluate_combination(
+    imp_name,
+    fold,
+    clf_name,
+    clf_cfg,
+    X_tr,
+    X_te,
+    y_tr,
+    y_te,
+    classes,
+    *,
+    seed,
+    runtime_mode,
+    tune_max_samples,
+    n_inner,
+    scoring,
+    svm_max,
+    t_imp_fit,
+    t_imp_transform,
+    fit_kwargs=None,
+):
+    fit_kwargs = dict(fit_kwargs or {})
+    try:
+        if clf_cfg["needs_scaling"]:
+            scaler = StandardScaler()
+            Xtr = scaler.fit_transform(X_tr)
+            Xte = scaler.transform(X_te)
+        else:
+            if isinstance(X_tr, pd.DataFrame):
+                Xtr = X_tr.copy()
+                Xte = X_te.copy()
+            else:
+                Xtr = np.asarray(X_tr)
+                Xte = np.asarray(X_te)
+
+        ytr = _to_numpy(y_tr).astype(int)
+        yte_np = _to_numpy(y_te).astype(int)
+
+        if clf_name == "cuML_SVM" and svm_max and len(Xtr) > svm_max:
+            rng = np.random.RandomState(seed)
+            idx = rng.choice(len(Xtr), svm_max, replace=False)
+            Xtr = _take_rows(Xtr, idx)
+            ytr = ytr[idx]
+            log.warning("cuML_SVM subsampled train set: %d -> %d", len(y_tr), svm_max)
+
+        sample_weight = None
+        if clf_name in {"XGBoost", "CatBoost"}:
+            sample_weight = compute_sample_weight("balanced", ytr)
+
+        if runtime_mode == "fast":
+            best_params = dict(clf_cfg.get("fixed_params", {}))
+            best_model = clone(clf_cfg["model"])
+            if best_params:
+                best_model.set_params(**best_params)
+            _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight, fit_kwargs=fit_kwargs)
+            best_score = np.nan
+            t_tuning = 0.0
+        else:
+            X_tune, y_tune, w_tune, used_subset = Xtr, ytr, sample_weight, False
+            if runtime_mode == "hybrid":
+                tune_seed = seed + fold * 101 + sum(ord(ch) for ch in clf_name)
+                X_tune, y_tune, w_tune, used_subset = _stratified_tuning_subset(
+                    Xtr,
+                    ytr,
+                    sample_weight,
+                    tune_max_samples,
+                    tune_seed,
+                )
+                if used_subset:
+                    log.info(
+                        "%s fold%d %s: tuning subset %d/%d samples",
+                        imp_name,
+                        fold,
+                        clf_name,
+                        len(y_tune),
+                        len(ytr),
+                    )
+
+            n_inner_eff = _safe_inner_splits(y_tune, n_inner)
+            if n_inner_eff is None:
+                best_params = dict(clf_cfg.get("fixed_params", {}))
+                best_model = clone(clf_cfg["model"])
+                if best_params:
+                    best_model.set_params(**best_params)
+                _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight, fit_kwargs=fit_kwargs)
+                best_score = np.nan
+                t_tuning = 0.0
+            else:
+                inner_cv = StratifiedKFold(n_splits=n_inner_eff, shuffle=True, random_state=seed + fold)
+                t0 = time.time()
+                if clf_cfg["engine"] == "cuml":
+                    best_model, best_params, best_score = _manual_random_search(
+                        estimator=clf_cfg["model"],
+                        param_distributions=clf_cfg["params"],
+                        n_iter=clf_cfg["n_iter"],
+                        cv=inner_cv,
+                        scoring=scoring,
+                        X=X_tune,
+                        y=y_tune,
+                        seed=seed + fold,
+                        refit_X=Xtr if used_subset else None,
+                        refit_y=ytr if used_subset else None,
+                    )
+                else:
+                    search = RandomizedSearchCV(
+                        estimator=clone(clf_cfg["model"]),
+                        param_distributions=clf_cfg["params"],
+                        n_iter=clf_cfg["n_iter"],
+                        cv=inner_cv,
+                        scoring=scoring,
+                        random_state=seed + fold,
+                        n_jobs=clf_cfg["search_n_jobs"],
+                        verbose=0,
+                        error_score="raise",
+                        refit=True,
+                    )
+                    tune_fit_kwargs = dict(fit_kwargs)
+                    if w_tune is not None:
+                        tune_fit_kwargs["sample_weight"] = w_tune
+                    search.fit(X_tune, y_tune, **tune_fit_kwargs)
+
+                    best_params = search.best_params_
+                    best_score = search.best_score_
+                    if used_subset:
+                        best_model = clone(clf_cfg["model"])
+                        best_model.set_params(**best_params)
+                        _fit_with_optional_weights(
+                            best_model,
+                            Xtr,
+                            ytr,
+                            sample_weight=sample_weight,
+                            fit_kwargs=fit_kwargs,
+                        )
+                    else:
+                        best_model = search.best_estimator_
+                    del search
+
+                t_tuning = time.time() - t0
+
+        t0 = time.time()
+        y_pred = _to_numpy(best_model.predict(Xte)).astype(int)
+        if hasattr(best_model, "predict_proba"):
+            y_prob = _to_numpy(best_model.predict_proba(Xte))
+        else:
+            y_prob = _one_hot_proba(y_pred, classes)
+        t_pred = time.time() - t0
+
+        if y_prob.ndim == 1:
+            y_prob = np.column_stack([1 - y_prob, y_prob])
+        if y_prob.shape[1] != len(classes):
+            y_prob = _one_hot_proba(y_pred, classes)
+
+        metrics = _compute_metrics(yte_np, y_pred, y_prob, classes)
+
+        result = {
+            "fold": fold,
+            "imputer": imp_name,
+            "classifier": clf_name,
+            "accuracy": metrics["accuracy"],
+            "recall_weighted": metrics["recall_weighted"],
+            "f1_weighted": metrics["f1_weighted"],
+            "auc_weighted": metrics["auc_weighted"],
+            "recall_macro": metrics["recall_macro"],
+            "f1_macro": metrics["f1_macro"],
+            "auc_macro": metrics["auc_macro"],
+            "time_imputation_fit": t_imp_fit,
+            "time_imputation_transform": t_imp_transform,
+            "time_tuning": t_tuning,
+            "time_prediction": t_pred,
+            "time_total": t_imp_fit + t_imp_transform + t_tuning + t_pred,
+            "best_params": str(best_params),
+            "best_inner_score": float(best_score),
+            "classification_report": metrics["classification_report"],
+            "confusion_matrix": metrics["confusion_matrix"],
+        }
+
+        log.info(
+            "%s fold%d %s: F1=%.4f AUC=%.4f (%s)",
+            imp_name,
+            fold,
+            clf_name,
+            metrics["f1_weighted"],
+            metrics["auc_weighted"] if not np.isnan(metrics["auc_weighted"]) else -1,
+            _fmt_time(t_tuning),
+        )
+        return result
+
+    except Exception as e:
+        log.error("%s fold%d %s failed: %s", imp_name, fold, clf_name, e)
+        traceback.print_exc()
+        return {
+            "fold": fold,
+            "imputer": imp_name,
+            "classifier": clf_name,
+            "error": str(e),
+        }
+
+
 def run_classification(config_path="config/config.yaml", filter_imputers=None, filter_classifiers=None):
     cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
@@ -670,6 +893,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     svm_max = cfg["classification"].get("svm_max_train_samples") or 20000
 
     imp_dir = Path(cfg["paths"]["imputed_data"])
+    proc_dir = Path(cfg["paths"]["processed_data"])
     res_dir = Path(cfg["paths"]["results_raw"])
     res_dir.mkdir(parents=True, exist_ok=True)
     np.random.seed(seed)
@@ -677,6 +901,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     with open(Path(cfg["paths"]["results_tables"]) / "metadata.json", "r", encoding="utf-8") as f:
         meta = json.load(f)
     _ = meta.get("n_classes", None)
+    cat_cols = meta.get("cat_cols", [])
 
     tempos_imp = {}
     tempos_path = res_dir / "tempos_imputacao.json"
@@ -684,13 +909,14 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
         with open(tempos_path, "r", encoding="utf-8") as f:
             tempos_imp = json.load(f)
 
-    imp_names = filter_imputers or IMPUTER_NAMES
-    available_imp = [
+    requested_imputers = filter_imputers or MAIN_IMPUTER_NAMES
+    requested_main_imputers = [name for name in requested_imputers if name in MAIN_IMPUTER_NAMES]
+    available_main_imputers = [
         name
-        for name in imp_names
+        for name in requested_main_imputers
         if all((imp_dir / f"{name}_fold{f}_train.parquet").exists() for f in range(n_outer))
     ]
-    log.info("Available imputers: %s", available_imp)
+    log.info("Main imputers available: %s", available_main_imputers)
 
     classifiers = _build_classifiers(cfg)
     runtime_mode, tune_max_samples, n_inner = _runtime_setup(cfg, classifiers)
@@ -701,8 +927,78 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
         tune_max_samples,
     )
 
-    clf_names = filter_classifiers or _ordered_config_classifiers(cfg)
-    clf_names = [name for name in clf_names if name in classifiers]
+    requested_clf = filter_classifiers or _ordered_config_classifiers(cfg)
+    requested_clf = [name for name in requested_clf if name in classifiers]
+    main_clf_names = [name for name in requested_clf if name != "CatBoost"]
+
+    baseline_cfg = cfg.get("classification", {}).get("baselines", {})
+    use_xgb_baseline = bool(baseline_cfg.get("xgboost_native_missing", True))
+    use_catboost_raw = bool(baseline_cfg.get("catboost_raw_no_encoding", True))
+
+    filter_imputers_set = set(filter_imputers or [])
+    filter_classifiers_set = set(filter_classifiers or [])
+
+    noimpute_available = all((imp_dir / f"{NO_IMPUTER_NAME}_fold{f}_train.parquet").exists() for f in range(n_outer))
+    run_xgb_baseline = (
+        use_xgb_baseline
+        and noimpute_available
+        and ("XGBoost" in classifiers)
+        and (not filter_imputers or NO_IMPUTER_NAME in filter_imputers_set)
+        and (not filter_classifiers or "XGBoost" in filter_classifiers_set)
+    )
+    if use_xgb_baseline and not noimpute_available:
+        log.warning(
+            "Baseline '%s + XGBoost' requested but NoImpute folds are missing in %s.",
+            NO_IMPUTER_NAME,
+            imp_dir,
+        )
+
+    raw_path = proc_dir / "X_raw_prepared.parquet"
+    fold_indices_path = imp_dir / "fold_indices.json"
+    run_catboost_raw = (
+        use_catboost_raw
+        and raw_path.exists()
+        and fold_indices_path.exists()
+        and (not filter_imputers or RAW_CATBOOST_IMPUTER in filter_imputers_set)
+        and (not filter_classifiers or "CatBoost" in filter_classifiers_set)
+    )
+    if use_catboost_raw and (not raw_path.exists() or not fold_indices_path.exists()):
+        log.warning(
+            "Baseline '%s + CatBoost' requested but required artifacts are missing: %s, %s",
+            RAW_CATBOOST_IMPUTER,
+            raw_path,
+            fold_indices_path,
+        )
+
+    tasks = []
+    for imp_name in available_main_imputers:
+        for fold in range(n_outer):
+            for clf_name in main_clf_names:
+                tasks.append({"kind": "main", "imputer": imp_name, "fold": fold, "classifier": clf_name})
+
+    if run_xgb_baseline:
+        for fold in range(n_outer):
+            tasks.append(
+                {
+                    "kind": "baseline_xgb_native_missing",
+                    "imputer": NO_IMPUTER_NAME,
+                    "fold": fold,
+                    "classifier": "XGBoost",
+                }
+            )
+
+    if run_catboost_raw:
+        for fold in range(n_outer):
+            tasks.append(
+                {
+                    "kind": "baseline_catboost_raw",
+                    "imputer": RAW_CATBOOST_IMPUTER,
+                    "fold": fold,
+                    "classifier": "CatBoost",
+                }
+            )
+
+    log.info("Planned tasks: %d", len(tasks))
 
     ckpt_suffix = "" if runtime_mode == "default" else f"_{runtime_mode}"
     ckpt_path = res_dir / f"checkpoint_classification{ckpt_suffix}.json"
@@ -712,25 +1008,19 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     if ckpt_path.exists():
         with open(ckpt_path, "r", encoding="utf-8") as f:
             ckpt = json.load(f)
-        raw_completed = set(ckpt.get("completed", []))
-        completed = set()
-        for key in raw_completed:
-            key = str(key)
-            parts = key.split("__", 1)
-            if parts[0] in {"default", "hybrid", "fast"}:
-                if parts[0] == runtime_mode:
-                    completed.add(key)
-            elif runtime_mode == "default":
-                completed.add(f"default__{key}")
 
-        all_results = []
-        for row in ckpt.get("results", []):
-            row_mode = row.get("runtime_mode", "default")
-            if row_mode == runtime_mode:
-                row["runtime_mode"] = row_mode
-                all_results.append(row)
-
-        log.info("Checkpoint loaded (%s): %d completed combinations", runtime_mode, len(completed))
+        if ckpt.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+            log.warning(
+                "Checkpoint schema mismatch (%s). Ignoring old checkpoint and starting fresh.",
+                ckpt.get("schema_version"),
+            )
+            completed = set()
+            all_results = []
+        else:
+            mode_prefix = f"{runtime_mode}__"
+            completed = {str(key) for key in ckpt.get("completed", []) if str(key).startswith(mode_prefix)}
+            all_results = [row for row in ckpt.get("results", []) if row.get("runtime_mode") == runtime_mode]
+            log.info("Checkpoint loaded (%s): %d completed combinations", runtime_mode, len(completed))
     else:
         completed = set()
         all_results = []
@@ -738,224 +1028,133 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
     y0 = pd.read_parquet(imp_dir / "y_fold0_train.parquet")["target"]
     classes = np.sort(y0.unique())
 
-    total = len(available_imp) * len(clf_names) * n_outer
-    pbar = tqdm(total=total, desc="Classification")
+    X_raw_all = None
+    y_all = None
+    fold_indices = {}
+    raw_cat_features = [col for col in cat_cols if isinstance(col, str)]
+    raw_missing_token = meta.get("raw_cat_missing_token", "__MISSING__")
+    if run_catboost_raw:
+        X_raw_all = pd.read_parquet(raw_path)
+        raw_cat_features = [col for col in raw_cat_features if col in X_raw_all.columns]
+        for col in raw_cat_features:
+            X_raw_all[col] = X_raw_all[col].astype("string").fillna(raw_missing_token)
+        y_all = pd.read_parquet(proc_dir / "y_prepared.parquet")["target"]
+        if len(X_raw_all) != len(y_all):
+            raise ValueError(
+                f"Raw feature size mismatch: X_raw_prepared has {len(X_raw_all)} rows and y_prepared has {len(y_all)} rows."
+            )
+        with open(fold_indices_path, "r", encoding="utf-8") as f:
+            fold_indices = json.load(f)
 
-    for imp_name in available_imp:
-        for fold in range(n_outer):
-            X_tr = pd.read_parquet(imp_dir / f"{imp_name}_fold{fold}_train.parquet")
-            X_te = pd.read_parquet(imp_dir / f"{imp_name}_fold{fold}_test.parquet")
-            y_tr = pd.read_parquet(imp_dir / f"y_fold{fold}_train.parquet")["target"]
-            y_te = pd.read_parquet(imp_dir / f"y_fold{fold}_test.parquet")["target"]
+    pbar = tqdm(total=len(tasks), desc="Classification")
 
-            ti = tempos_imp.get(imp_name, {}).get(str(fold), {})
-            t_imp_fit = ti.get("time_fit", 0)
-            t_imp_transform = ti.get("time_transform_train", 0) + ti.get("time_transform_test", 0)
+    for task in tasks:
+        imp_name = task["imputer"]
+        fold = int(task["fold"])
+        clf_name = task["classifier"]
+        key = f"{runtime_mode}__{imp_name}__{fold}__{clf_name}"
 
-            for clf_name in clf_names:
-                key = f"{runtime_mode}__{imp_name}__{fold}__{clf_name}"
-                if key in completed:
-                    pbar.update(1)
-                    continue
+        if key in completed:
+            pbar.update(1)
+            continue
 
-                clf_cfg = classifiers[clf_name]
-                if not clf_cfg.get("available", False):
-                    err_msg = clf_cfg.get("error") or "Classifier dependencies unavailable."
-                    log.error("%s fold%d %s: %s", imp_name, fold, clf_name, err_msg)
-                    result = {
-                        "runtime_mode": runtime_mode,
-                        "fold": fold,
-                        "imputer": imp_name,
-                        "classifier": clf_name,
-                        "error": err_msg,
-                    }
-                    all_results.append(result)
-                    completed.add(key)
-                    pbar.update(1)
-                    with open(ckpt_path, "w", encoding="utf-8") as f:
-                        json.dump({"completed": list(completed), "results": _serialize(all_results)}, f)
-                    continue
+        clf_cfg = classifiers[clf_name]
+        result = None
 
+        try:
+            if not clf_cfg.get("available", False):
+                err_msg = clf_cfg.get("error") or "Classifier dependencies unavailable."
+                log.error("%s fold%d %s: %s", imp_name, fold, clf_name, err_msg)
+                result = {
+                    "runtime_mode": runtime_mode,
+                    "fold": fold,
+                    "imputer": imp_name,
+                    "classifier": clf_name,
+                    "error": err_msg,
+                }
+            elif task["kind"] in {"main", "baseline_xgb_native_missing"}:
+                X_tr = pd.read_parquet(imp_dir / f"{imp_name}_fold{fold}_train.parquet")
+                X_te = pd.read_parquet(imp_dir / f"{imp_name}_fold{fold}_test.parquet")
+                y_tr = pd.read_parquet(imp_dir / f"y_fold{fold}_train.parquet")["target"]
+                y_te = pd.read_parquet(imp_dir / f"y_fold{fold}_test.parquet")["target"]
 
-                if imp_name == "None" and clf_name not in {"XGBoost", "CatBoost"}:
-                    log.info("Skipping %s with imputer 'None' (does not support NaNs)", clf_name)
-                    continue
+                ti = tempos_imp.get(imp_name, {}).get(str(fold), {})
+                t_imp_fit = ti.get("time_fit", 0.0)
+                t_imp_transform = ti.get("time_transform_train", 0.0) + ti.get("time_transform_test", 0.0)
 
-                if clf_cfg["needs_scaling"]:
-                    scaler = StandardScaler()
-                    Xtr = scaler.fit_transform(X_tr)
-                    Xte = scaler.transform(X_te)
-                else:
-                    Xtr = X_tr.values
-                    Xte = X_te.values
+                result = _evaluate_combination(
+                    imp_name,
+                    fold,
+                    clf_name,
+                    clf_cfg,
+                    X_tr,
+                    X_te,
+                    y_tr,
+                    y_te,
+                    classes,
+                    seed=seed,
+                    runtime_mode=runtime_mode,
+                    tune_max_samples=tune_max_samples,
+                    n_inner=n_inner,
+                    scoring=scoring,
+                    svm_max=svm_max,
+                    t_imp_fit=t_imp_fit,
+                    t_imp_transform=t_imp_transform,
+                    fit_kwargs=None,
+                )
+                result["runtime_mode"] = runtime_mode
+                del X_tr, X_te, y_tr, y_te
+            else:
+                fold_idx = fold_indices.get(str(fold), fold_indices.get(fold))
+                if fold_idx is None:
+                    raise KeyError(f"Fold indices not found for fold={fold}")
 
-                ytr = y_tr.values
+                tr_idx = np.asarray(fold_idx["train"], dtype=int)
+                te_idx = np.asarray(fold_idx["test"], dtype=int)
+                X_tr = X_raw_all.iloc[tr_idx].copy()
+                X_te = X_raw_all.iloc[te_idx].copy()
+                y_tr = y_all.iloc[tr_idx]
+                y_te = y_all.iloc[te_idx]
 
-                if clf_name == "cuML_SVM" and svm_max and len(Xtr) > svm_max:
-                    rng = np.random.RandomState(seed)
-                    idx = rng.choice(len(Xtr), svm_max, replace=False)
-                    Xtr, ytr = Xtr[idx], ytr[idx]
-                    log.warning("cuML_SVM subsampled train set: %d -> %d", len(X_tr), svm_max)
+                result = _evaluate_combination(
+                    imp_name,
+                    fold,
+                    clf_name,
+                    clf_cfg,
+                    X_tr,
+                    X_te,
+                    y_tr,
+                    y_te,
+                    classes,
+                    seed=seed,
+                    runtime_mode=runtime_mode,
+                    tune_max_samples=tune_max_samples,
+                    n_inner=n_inner,
+                    scoring=scoring,
+                    svm_max=svm_max,
+                    t_imp_fit=0.0,
+                    t_imp_transform=0.0,
+                    fit_kwargs={"cat_features": raw_cat_features},
+                )
+                result["runtime_mode"] = runtime_mode
+                del X_tr, X_te, y_tr, y_te
 
-                sample_weight = None
-                if clf_name in {"XGBoost", "CatBoost"}:
-                    sample_weight = compute_sample_weight("balanced", ytr)
+        except Exception as e:
+            log.error("%s fold%d %s failed during data assembly: %s", imp_name, fold, clf_name, e)
+            traceback.print_exc()
+            result = {
+                "runtime_mode": runtime_mode,
+                "fold": fold,
+                "imputer": imp_name,
+                "classifier": clf_name,
+                "error": str(e),
+            }
 
-                try:
-                    if runtime_mode == "fast":
-                        best_params = dict(clf_cfg.get("fixed_params", {}))
-                        best_model = clone(clf_cfg["model"])
-                        if best_params:
-                            best_model.set_params(**best_params)
-                        _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
-                        best_score = np.nan
-                        t_tuning = 0.0
-                    else:
-                        X_tune, y_tune, w_tune, used_subset = Xtr, ytr, sample_weight, False
-                        if runtime_mode == "hybrid":
-                            tune_seed = seed + fold * 101 + sum(ord(ch) for ch in clf_name)
-                            X_tune, y_tune, w_tune, used_subset = _stratified_tuning_subset(
-                                Xtr,
-                                ytr,
-                                sample_weight,
-                                tune_max_samples,
-                                tune_seed,
-                            )
-                            if used_subset:
-                                log.info(
-                                    "%s fold%d %s: tuning subset %d/%d samples",
-                                    imp_name,
-                                    fold,
-                                    clf_name,
-                                    len(y_tune),
-                                    len(ytr),
-                                )
-
-                        n_inner_eff = _safe_inner_splits(y_tune, n_inner)
-                        if n_inner_eff is None:
-                            best_params = dict(clf_cfg.get("fixed_params", {}))
-                            best_model = clone(clf_cfg["model"])
-                            if best_params:
-                                best_model.set_params(**best_params)
-                            _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
-                            best_score = np.nan
-                            t_tuning = 0.0
-                        else:
-                            inner_cv = StratifiedKFold(n_splits=n_inner_eff, shuffle=True, random_state=seed + fold)
-                            t0 = time.time()
-                            if clf_cfg["engine"] == "cuml":
-                                best_model, best_params, best_score = _manual_random_search(
-                                    estimator=clf_cfg["model"],
-                                    param_distributions=clf_cfg["params"],
-                                    n_iter=clf_cfg["n_iter"],
-                                    cv=inner_cv,
-                                    scoring=scoring,
-                                    X=X_tune,
-                                    y=y_tune,
-                                    seed=seed + fold,
-                                    refit_X=Xtr if used_subset else None,
-                                    refit_y=ytr if used_subset else None,
-                                )
-                            else:
-                                search = RandomizedSearchCV(
-                                    estimator=clone(clf_cfg["model"]),
-                                    param_distributions=clf_cfg["params"],
-                                    n_iter=clf_cfg["n_iter"],
-                                    cv=inner_cv,
-                                    scoring=scoring,
-                                    random_state=seed + fold,
-                                    n_jobs=clf_cfg["search_n_jobs"],
-                                    verbose=0,
-                                    error_score="raise",
-                                    refit=True,
-                                )
-                                if w_tune is not None:
-                                    search.fit(X_tune, y_tune, sample_weight=w_tune)
-                                else:
-                                    search.fit(X_tune, y_tune)
-
-                                best_params = search.best_params_
-                                best_score = search.best_score_
-                                if used_subset:
-                                    best_model = clone(clf_cfg["model"])
-                                    best_model.set_params(**best_params)
-                                    _fit_with_optional_weights(best_model, Xtr, ytr, sample_weight=sample_weight)
-                                else:
-                                    best_model = search.best_estimator_
-                                del search
-
-                            t_tuning = time.time() - t0
-
-                    t0 = time.time()
-                    y_pred = _to_numpy(best_model.predict(Xte)).astype(int)
-                    if hasattr(best_model, "predict_proba"):
-                        y_prob = _to_numpy(best_model.predict_proba(Xte))
-                    else:
-                        y_prob = _one_hot_proba(y_pred, classes)
-                    t_pred = time.time() - t0
-
-                    if y_prob.ndim == 1:
-                        y_prob = np.column_stack([1 - y_prob, y_prob])
-                    if y_prob.shape[1] != len(classes):
-                        y_prob = _one_hot_proba(y_pred, classes)
-
-                    metrics = _compute_metrics(y_te.values, y_pred, y_prob, classes)
-
-                    result = {
-                        "runtime_mode": runtime_mode,
-                        "fold": fold,
-                        "imputer": imp_name,
-                        "classifier": clf_name,
-                        "accuracy": metrics["accuracy"],
-                        "recall_weighted": metrics["recall_weighted"],
-                        "f1_weighted": metrics["f1_weighted"],
-                        "auc_weighted": metrics["auc_weighted"],
-                        "recall_macro": metrics["recall_macro"],
-                        "f1_macro": metrics["f1_macro"],
-                        "auc_macro": metrics["auc_macro"],
-                        "time_imputation_fit": t_imp_fit,
-                        "time_imputation_transform": t_imp_transform,
-                        "time_tuning": t_tuning,
-                        "time_prediction": t_pred,
-                        "time_total": t_imp_fit + t_imp_transform + t_tuning + t_pred,
-                        "best_params": str(best_params),
-                        "best_inner_score": float(best_score),
-                        "classification_report": metrics["classification_report"],
-                        "confusion_matrix": metrics["confusion_matrix"],
-                    }
-
-                    log.info(
-                        "%s fold%d %s: F1=%.4f AUC=%.4f (%s)",
-                        imp_name,
-                        fold,
-                        clf_name,
-                        metrics["f1_weighted"],
-                        metrics["auc_weighted"] if not np.isnan(metrics["auc_weighted"]) else -1,
-                        _fmt_time(t_tuning),
-                    )
-
-                except Exception as e:
-                    log.error("%s fold%d %s failed: %s", imp_name, fold, clf_name, e)
-                    traceback.print_exc()
-                    result = {
-                        "runtime_mode": runtime_mode,
-                        "fold": fold,
-                        "imputer": imp_name,
-                        "classifier": clf_name,
-                        "error": str(e),
-                    }
-
-                all_results.append(result)
-                completed.add(key)
-                pbar.update(1)
-
-                with open(ckpt_path, "w", encoding="utf-8") as f:
-                    json.dump({"completed": list(completed), "results": _serialize(all_results)}, f)
-
-                gc.collect()
-
-            del X_tr, X_te, y_tr, y_te
-            gc.collect()
+        all_results.append(result)
+        completed.add(key)
+        pbar.update(1)
+        _save_classification_checkpoint(ckpt_path, completed, all_results)
+        gc.collect()
 
     pbar.close()
 

@@ -137,7 +137,7 @@ python main.py --runtime-mode fast --n-sample 100000
 ### 1) `prepare` (`src/data_preparation.py`)
 
 - Filtra por ano (`DATAPRICON`, 2013-2023)
-- Converte codigos "sem informacao" para `NaN` usando `config/dicionario_valores_validos.json`
+- Converte codigos nao informativos para `NaN` (ex.: "Sem informacao", "Nao avaliado", "Nao se aplica", ocupacao ignorada) usando `config/dicionario_valores_validos.json`
 - Filtra classes validas do alvo
 - Remove variaveis de leakage/administrativas
 - Reduz cardinalidade de variaveis de alta cardinalidade
@@ -303,7 +303,7 @@ Tabelas (`results/tables/`):
 - `stat_friedman_*.csv`
 - `stat_wilcoxon_*.csv`
 - `metadata.json`
-- `missing_report_pre_filter.csv` e `missing_report_post_filter.csv`
+- `missing_report_raw.csv`, `missing_report_pre_filter.csv` e `missing_report_post_filter.csv`
 
 Resultados brutos (`results/raw/`):
 

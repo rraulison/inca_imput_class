@@ -21,6 +21,16 @@ from src.config_loader import load_config
 log = logging.getLogger(__name__)
 
 
+NON_INFO_LABEL_MARKERS = (
+    "sem informacao",
+    "nao avaliado",
+    "nao se aplica",
+    "nao informado",
+    "ignorado",
+    "ignorada",
+)
+
+
 EXCLUDE_REASONS = {
     "TNM": "LEAKAGE",
     "OUTROESTA": "LEAKAGE",
@@ -48,15 +58,33 @@ EXCLUDE_REASONS = {
 }
 
 
-def _missing_report(df):
-    return pd.DataFrame(
-        {
-            "n_missing": df.isnull().sum(),
-            "pct_missing": df.isnull().mean(),
-            "n_unique": df.nunique(),
-            "dtype": df.dtypes.astype(str),
+def _missing_report(df, missing_rules=None):
+    if not missing_rules:
+        return pd.DataFrame(
+            {
+                "n_missing": df.isnull().sum(),
+                "pct_missing": df.isnull().mean(),
+                "n_unique": df.nunique(),
+                "dtype": df.dtypes.astype(str),
+            }
+        ).sort_values("pct_missing", ascending=False)
+
+    rows = {}
+    for col in df.columns:
+        series = df[col]
+        mask = series.isna()
+        rules = missing_rules.get(col, {})
+        if rules:
+            mask = mask | _non_informative_mask(series, rules)
+
+        rows[col] = {
+            "n_missing": int(mask.sum()),
+            "pct_missing": float(mask.mean()),
+            "n_unique": int(series.mask(mask).nunique(dropna=True)),
+            "dtype": str(series.dtype),
         }
-    ).sort_values("pct_missing", ascending=False)
+
+    return pd.DataFrame.from_dict(rows, orient="index").sort_values("pct_missing", ascending=False)
 
 
 def _reduce_cardinality(series, min_freq=100):
@@ -72,8 +100,12 @@ def _normalize_text(value):
     return " ".join(txt.lower().split())
 
 
-def _load_sem_info_codes(dict_path):
-    """Load per-column codes labeled as 'sem informacao' from data dictionary."""
+def _is_non_informative_label(label):
+    return any(marker in _normalize_text(label) for marker in NON_INFO_LABEL_MARKERS)
+
+
+def _load_missing_rules(dict_path):
+    """Load per-column dictionary rules for codes that should be treated as missing."""
     if not dict_path.exists():
         log.warning("Data dictionary not found: %s", dict_path)
         return {}
@@ -81,28 +113,66 @@ def _load_sem_info_codes(dict_path):
     with open(dict_path, "r", encoding="utf-8") as f:
         dictionary = json.load(f)
 
-    sem_info_codes = {}
+    missing_rules = {}
     for col, spec in dictionary.items():
-        vals = spec.get("valores") if isinstance(spec, dict) else None
-        if not isinstance(vals, dict):
+        if not isinstance(spec, dict):
             continue
 
-        codes = [str(code).strip() for code, label in vals.items() if "sem informacao" in _normalize_text(label)]
-        if codes:
-            sem_info_codes[col] = codes
+        vals = spec.get("valores") if isinstance(spec, dict) else None
+        codes = []
+        regex_patterns = []
 
-    return sem_info_codes
+        if isinstance(vals, dict):
+            codes = [str(code).strip() for code, label in vals.items() if _is_non_informative_label(label)]
+        elif isinstance(vals, str):
+            vals_norm = _normalize_text(vals)
+            # From dictionary text: "mais de tres 9 representa ocupacao ignorada".
+            if "mais de tres 9" in vals_norm and "ocupacao ignorad" in vals_norm:
+                regex_patterns.append(r"9{4,}")
+
+        if codes or regex_patterns:
+            missing_rules[col] = {
+                "codes": sorted(set(codes)),
+                "regex": regex_patterns,
+            }
+
+    return missing_rules
 
 
-def _replace_sem_info_with_nan(df, sem_info_codes):
-    """Replace known 'sem informacao' category codes by NaN for each available column."""
+def _non_informative_mask(series, rules):
+    series_str = series.astype("string").str.strip()
+    mask = pd.Series(False, index=series.index, dtype=bool)
+
+    codes = [str(c).strip() for c in rules.get("codes", []) if str(c).strip()]
+    if codes:
+        code_set = set(codes)
+        mask |= series_str.isin(code_set).fillna(False)
+
+        numeric_codes = []
+        for code in code_set:
+            try:
+                numeric_codes.append(float(code))
+            except (TypeError, ValueError):
+                continue
+
+        if numeric_codes:
+            series_num = pd.to_numeric(series_str, errors="coerce")
+            mask |= series_num.isin(numeric_codes).fillna(False)
+
+    for pattern in rules.get("regex", []):
+        mask |= series_str.str.fullmatch(pattern, na=False)
+
+    return mask
+
+
+def _replace_missing_with_nan(df, missing_rules):
+    """Apply dictionary rules and replace non-informative values by NaN."""
     replaced = {}
-    for col, codes in sem_info_codes.items():
+    for col, rules in missing_rules.items():
         if col not in df.columns:
             continue
 
-        code_set = {str(c).strip() for c in codes}
-        mask = df[col].astype(str).str.strip().isin(code_set)
+        mask = _non_informative_mask(df[col], rules)
         n_replaced = int(mask.sum())
         if n_replaced > 0:
             df.loc[mask, col] = np.nan
@@ -125,6 +195,19 @@ def prepare_data(df, config_path="config/config.yaml"):
     meta = {"shape_original": list(df.shape)}
     log.info("Original shape: %s", df.shape)
 
+    # Keep insertion order while preventing duplicated columns when a feature is
+    # listed in both safe and high-cardinality config groups.
+    all_features = list(dict.fromkeys(data_cfg["features_safe"] + data_cfg["features_high_cardinality"]))
+    all_features = [f for f in all_features if f in df.columns]
+
+    dict_path = Path(config_path).resolve().parent / "dicionario_valores_validos.json"
+    missing_rules = _load_missing_rules(dict_path)
+
+    mr_raw = _missing_report(df[all_features], missing_rules=missing_rules)
+    mr_raw.to_csv(out_tables / "missing_report_raw.csv")
+    meta["missing_report_raw_rows"] = int(len(df))
+    log.info("Raw missing report generated for %d features", len(all_features))
+
     date_col = data_cfg["date_filter_col"]
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
     n0 = len(df)
@@ -141,13 +224,13 @@ def prepare_data(df, config_path="config/config.yaml"):
     )
     meta["n_after_date_filter"] = len(df)
 
-    dict_path = Path(config_path).resolve().parent / "dicionario_valores_validos.json"
-    sem_info_codes = _load_sem_info_codes(dict_path)
-    sem_info_replaced = _replace_sem_info_with_nan(df, sem_info_codes)
+    sem_info_replaced = _replace_missing_with_nan(df, missing_rules)
     if sem_info_replaced:
-        log.info("Replaced 'sem informacao' with NaN in %d columns", len(sem_info_replaced))
-    if "BASDIAGSP" in sem_info_codes:
-        log.info("BASDIAGSP codes treated as NaN: %s", sem_info_codes["BASDIAGSP"])
+        log.info("Replaced non-informative dictionary values with NaN in %d columns", len(sem_info_replaced))
+    if "BASDIAGSP" in missing_rules:
+        log.info("BASDIAGSP rules treated as NaN: %s", missing_rules["BASDIAGSP"])
+    if "OCUPACAO" in missing_rules:
+        log.info("OCUPACAO rules treated as NaN: %s", missing_rules["OCUPACAO"])
     meta["sem_info_replaced_by_column"] = sem_info_replaced
 
     target_col = data_cfg["target_col"]
@@ -162,10 +245,7 @@ def prepare_data(df, config_path="config/config.yaml"):
     log.info("Target filter: %s -> %s", f"{n0:,}", f"{len(df):,}")
     meta["n_after_target_filter"] = len(df)
 
-    # Keep insertion order while preventing duplicated columns when a feature is
-    # listed in both safe and high-cardinality config groups.
-    features = list(dict.fromkeys(data_cfg["features_safe"] + data_cfg["features_high_cardinality"]))
-    features = [f for f in features if f in df.columns]
+    features = [f for f in all_features if f in df.columns]
     df = df[features + [target_col]].copy()
     log.info("Selected features: %d", len(features))
 
@@ -200,6 +280,9 @@ def prepare_data(df, config_path="config/config.yaml"):
         df["IDADE"] = pd.to_numeric(df["IDADE"], errors="coerce")
         df.loc[(df["IDADE"] < 0) | (df["IDADE"] > 120), "IDADE"] = np.nan
 
+    ordered_features = num_cols + cat_cols
+    df_raw = df[ordered_features].copy()
+
     encoders = {}
     valid_values = {}
     for col in cat_cols:
@@ -219,22 +302,31 @@ def prepare_data(df, config_path="config/config.yaml"):
 
     n_sample = cfg["experiment"]["n_sample"]
     if len(df) > n_sample:
-        df, _ = train_test_split(
-            df,
+        idx = np.arange(len(df))
+        idx_sample, _ = train_test_split(
+            idx,
             train_size=n_sample,
             stratify=df[target_col],
             random_state=seed,
         )
+        idx_sample = np.sort(idx_sample)
+        df = df.iloc[idx_sample].copy()
+        df_raw = df_raw.iloc[idx_sample].copy()
         log.info("Stratified sample used: %s", f"{len(df):,}")
 
-    ordered_features = num_cols + cat_cols
     X = df[ordered_features].reset_index(drop=True)
+    X_raw = df_raw[ordered_features].reset_index(drop=True)
+    for col in cat_cols:
+        # CatBoost baseline without encoding requires string/integer categories.
+        # Represent missing categorical values explicitly instead of numerical encoding.
+        X_raw[col] = X_raw[col].astype("string").fillna("__MISSING__")
     y = df[target_col].reset_index(drop=True)
 
     assert y.isna().sum() == 0, "Target has NaN values"
     log.info("Final X: %s | y: %s | missing in X: %s", X.shape, y.shape, f"{int(X.isna().sum().sum()):,}")
 
     X.to_parquet(out_proc / "X_prepared.parquet", index=False)
+    X_raw.to_parquet(out_proc / "X_raw_prepared.parquet", index=False)
     y.to_frame("target").to_parquet(out_proc / "y_prepared.parquet", index=False)
 
     meta.update(
@@ -246,6 +338,7 @@ def prepare_data(df, config_path="config/config.yaml"):
             "target_mapping": {str(k): int(v) for k, v in target_map.items()},
             "shape_final": list(X.shape),
             "n_sample": len(X),
+            "raw_cat_missing_token": "__MISSING__",
         }
     )
     with open(out_tables / "metadata.json", "w", encoding="utf-8") as f:

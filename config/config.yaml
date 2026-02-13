@@ -75,7 +75,7 @@ cv:
   n_inner_folds: 3
 
 imputation:
-  imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest, "None"]
+  imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest, NoImpute]
   params:
     knn_neighbors: 5
     knn_max_fit_samples: 30000
@@ -89,7 +89,10 @@ imputation:
     xgb_learning_rate: 0.1
 
 classification:
-  classifiers: [XGBoost, CatBoost, cuML_RF, cuML_SVM]
+  classifiers: [XGBoost, cuML_RF, cuML_SVM]
+  baselines:
+    xgboost_native_missing: true
+    catboost_raw_no_encoding: true
   svm_max_train_samples: null
   tuning:
     n_iter: 20

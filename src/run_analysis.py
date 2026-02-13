@@ -34,7 +34,7 @@ plt.rcParams.update(
     }
 )
 
-IMP_ORDER = ["Media", "Mediana", "kNN", "MICE", "MICE_XGBoost", "MissForest"]
+IMP_ORDER = ["Media", "Mediana", "kNN", "MICE", "MICE_XGBoost", "MissForest", "NoImpute", "RawSemEncoding"]
 CLF_ORDER = ["cuML_RF", "XGBoost", "CatBoost", "cuML_SVM", "cuML_MLP"]
 
 IMP_LABELS = {
@@ -44,6 +44,8 @@ IMP_LABELS = {
     "MICE": "MICE",
     "MICE_XGBoost": "MICE-XGBoost",
     "MissForest": "MissForest",
+    "NoImpute": "Sem imputacao (NaN nativo)",
+    "RawSemEncoding": "Cru sem encoding (CatBoost)",
 }
 
 CLF_LABELS = {
@@ -61,6 +63,8 @@ IMP_COLORS = {
     "MICE": "#d62728",
     "MICE_XGBoost": "#9467bd",
     "MissForest": "#8c564b",
+    "NoImpute": "#17becf",
+    "RawSemEncoding": "#bcbd22",
 }
 
 
@@ -583,8 +587,13 @@ def run_analysis(config_path="config/config.yaml"):
         meta = json.load(f)
     target_map = meta.get("target_mapping", {})
 
-    missing_path = tab_dir / "missing_report_post_filter.csv"
-    missing_report = pd.read_csv(missing_path, index_col=0) if missing_path.exists() else None
+    missing_report = None
+    for missing_name in ("missing_report_raw.csv", "missing_report_post_filter.csv"):
+        missing_path = tab_dir / missing_name
+        if missing_path.exists():
+            missing_report = pd.read_csv(missing_path, index_col=0)
+            log.info("Missing report source for plot: %s", missing_name)
+            break
 
     summary = _aggregate(df_valid)
     summary.to_csv(tab_dir / "summary.csv", index=False)

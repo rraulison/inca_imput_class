@@ -7,6 +7,7 @@ Imputer is fit only on the train split of each fold to avoid data leakage.
 """
 
 import gc
+import hashlib
 import json
 import logging
 import pickle
@@ -40,6 +41,9 @@ except Exception:  # pragma: no cover - optional dependency
     CuMLRandomForestRegressor = None
 
 log = logging.getLogger(__name__)
+
+NO_IMPUTER_NAME = "NoImpute"
+SPLIT_SIGNATURE_FILE = "split_signature.json"
 
 
 class CategoricalRounder(BaseEstimator, TransformerMixin):
@@ -296,6 +300,24 @@ def _fmt_time(seconds):
     return f"{seconds / 3600:.1f}h"
 
 
+def _split_signature(y, fold_indices, n_folds):
+    y_arr = np.asarray(y, dtype=np.int32)
+    y_hash = hashlib.sha1(y_arr.tobytes()).hexdigest()
+    payload = {
+        "n_rows": int(len(y_arr)),
+        "n_folds": int(n_folds),
+        "y_sha1": y_hash,
+        "fold_indices": fold_indices,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return {
+        "hash": hashlib.sha1(canonical.encode("utf-8")).hexdigest(),
+        "n_rows": payload["n_rows"],
+        "n_folds": payload["n_folds"],
+        "y_sha1": payload["y_sha1"],
+    }
+
+
 def run_imputation(config_path="config/config.yaml", filter_imputers=None):
     cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
@@ -331,21 +353,43 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
         fold_indices[fold] = {"train": tr_idx.tolist(), "test": te_idx.tolist()}
         for split_name, idx in (("train", tr_idx), ("test", te_idx)):
             yp = out_dir / f"y_fold{fold}_{split_name}.parquet"
-            if not yp.exists():
-                y.iloc[idx].to_frame("target").to_parquet(yp, index=False)
+            y.iloc[idx].to_frame("target").to_parquet(yp, index=False)
 
     with open(out_dir / "fold_indices.json", "w", encoding="utf-8") as f:
         json.dump(fold_indices, f)
 
-    imputers = _build_imputers(num_cols, cat_cols, enc["valid_values"], cfg)
+    current_sig = _split_signature(y, fold_indices, n_folds)
+    sig_path = out_dir / SPLIT_SIGNATURE_FILE
+    force_recompute = False
+    if sig_path.exists():
+        with open(sig_path, "r", encoding="utf-8") as f:
+            previous_sig = json.load(f)
+        if previous_sig.get("hash") != current_sig["hash"]:
+            force_recompute = True
+            log.warning(
+                "Detected split/target signature change (%s -> %s). Recomputing all imputer folds.",
+                previous_sig.get("hash"),
+                current_sig["hash"],
+            )
+    with open(sig_path, "w", encoding="utf-8") as f:
+        json.dump(current_sig, f, indent=2)
 
-    if filter_imputers:
-        imputers = OrderedDict((k, v) for k, v in imputers.items() if k in filter_imputers)
+    base_imputers = _build_imputers(num_cols, cat_cols, enc["valid_values"], cfg)
+    cfg_imputers = cfg.get("imputation", {}).get("imputers") or list(base_imputers.keys()) + [NO_IMPUTER_NAME]
 
-    tempos_path = res_dir / "tempos_imputacao.json"
-    tempos = json.load(open(tempos_path, "r", encoding="utf-8")) if tempos_path.exists() else {}
+    imputers = OrderedDict()
+    seen = set()
+    for name in cfg_imputers:
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in base_imputers:
+            imputers[name] = base_imputers[name]
+        elif name == NO_IMPUTER_NAME:
+            imputers[name] = None  # No-imputation baseline for native NaN handling models.
+        else:
+            log.warning("Configured imputer '%s' is not available and will be skipped.", name)
 
-    imputers["None"] = None  # Placeholder for native handling
     if filter_imputers:
         imputers = OrderedDict((k, v) for k, v in imputers.items() if k in filter_imputers)
 
@@ -355,12 +399,14 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
     for imp_name, imputer in imputers.items():
         log.info("%s", "=" * 58)
         log.info("Imputer: %s", imp_name)
-        if imp_name not in tempos:
+        if force_recompute:
+            tempos[imp_name] = {}
+        elif imp_name not in tempos:
             tempos[imp_name] = {}
 
         for fold in tqdm(range(n_folds), desc=imp_name):
             ckpt = out_dir / f"{imp_name}_fold{fold}_train.parquet"
-            if ckpt.exists():
+            if ckpt.exists() and not force_recompute:
                 log.info("Fold %d already done, skipping", fold)
                 continue
 
@@ -371,8 +417,8 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
             X_te = X.iloc[te_idx].copy()
             log.info("Fold %d start | train=%d test=%d", fold, len(tr_idx), len(te_idx))
 
-            if imp_name == "None":
-                log.info("Imputer is None - skipping imputation for fold %d", fold)
+            if imp_name == NO_IMPUTER_NAME:
+                log.info("Imputer is %s - skipping imputation for fold %d", NO_IMPUTER_NAME, fold)
                 t_fit, t_tr, t_te = 0.0, 0.0, 0.0
                 # Directly save raw splits with NaNs
                 pd.DataFrame(X_tr, columns=all_cols).to_parquet(
@@ -383,6 +429,11 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
                     out_dir / f"{imp_name}_fold{fold}_test.parquet",
                     index=False,
                 )
+                tempos[imp_name][str(fold)] = {
+                    "time_fit": float(t_fit),
+                    "time_transform_train": float(t_tr),
+                    "time_transform_test": float(t_te),
+                }
             else:
                 try:
                     t0 = time.time()
@@ -418,6 +469,11 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
                     out_dir / f"{imp_name}_fold{fold}_test.parquet",
                     index=False,
                 )
+                tempos[imp_name][str(fold)] = {
+                    "time_fit": float(t_fit),
+                    "time_transform_train": float(t_tr),
+                    "time_transform_test": float(t_te),
+                }
                 del imp_clone, X_tr_imp, X_te_imp
                 gc.collect()
 
