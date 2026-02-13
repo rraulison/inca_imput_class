@@ -83,7 +83,7 @@ hardware:
 
 Parametros mais importantes:
 
-- `experiment.n_sample: 10000`
+- `experiment.n_sample: 100000`
 - `data.filepath: data/raw/df_raw.parquet`
 - `data.target_col: ESTADIAM`
 - `data.valid_classes: [0,1,2,3,4,88]`
@@ -126,10 +126,10 @@ Modos de runtime (via argparse):
 python main.py --runtime-mode default
 
 # hybrid: tuning leve em subset + refit no treino completo
-python main.py --runtime-mode hybrid --n-sample 100000 --tune-max-samples 20000
+python main.py --runtime-mode hybrid --n-sample 1000000 --tune-max-samples 60000
 
-# fast: sem tuning (usa hiperparametros fixos) para rodar 100k rapido
-python main.py --runtime-mode fast --n-sample 100000
+# fast: sem tuning (usa hiperparametros fixos) para execucao rapida
+python main.py --runtime-mode fast --n-sample 1000000
 ```
 
 ## O que cada etapa faz
@@ -190,53 +190,54 @@ Baseados nos artefatos atuais em `results/`.
 - Shape original: `5,399,686 x 47`
 - Apos filtro de data (2013-2023): `3,211,670`
 - Apos filtro de classes alvo: `1,586,358`
-- Shape final amostrado: `100,000 x 26`
+- Shape final amostrado: `1,000,000 x 25`
 - Classes finais (encoded): `0->0`, `1->1`, `2->2`, `3->3`, `4->4`, `88->5`
 
 Distribuicao de classes na amostra final (`y_prepared`):
 
 | target | count |
 |---:|---:|
-| 0 | 6166 |
-| 1 | 22625 |
-| 2 | 10128 |
-| 3 | 8413 |
-| 4 | 19147 |
-| 5 | 33521 |
+| 0 | 61659 |
+| 1 | 226253 |
+| 2 | 101279 |
+| 3 | 84130 |
+| 4 | 191467 |
+| 5 | 335212 |
 
 ### Cobertura experimental
 
-- Runtime desta rodada: `hybrid` (`n_sample=100000`, `tune_max_samples=20000`)
-- Combinacoes avaliadas em `summary.csv`: `18` (`6` imputadores x `3` classificadores)
-- Folds esperados: `54` (`18 x 3`)
-- Folds validos com metricas: `53`
-- Falhas: `1` fold (`MICE_XGBoost + cuML_SVM`) por `CUDA out_of_memory`
+- Runtime desta rodada: `hybrid` (`n_sample=1000000`, `tune_max_samples=60000`)
+- Combinacoes avaliadas em `summary.csv`: `20` (`18` principais + `2` baselines: `NoImpute + XGBoost` e `RawSemEncoding + CatBoost`)
+- Folds esperados: `60` (`20 x 3`)
+- Folds validos com metricas: `60`
+- Falhas: `0`
 
 ### Top combinacoes (ordenado por `f1_weighted_mean`)
 
 | imputer | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
 |:---|:---|---:|---:|---:|---:|
-| Media | XGBoost | 0.6782 | 0.6878 | 0.9265 | 38.2 |
-| kNN | XGBoost | 0.6776 | 0.6871 | 0.9262 | 252.7 |
-| Mediana | XGBoost | 0.6750 | 0.6855 | 0.9254 | 37.7 |
-| MICE_XGBoost | XGBoost | 0.6741 | 0.6847 | 0.9252 | 88.0 |
-| MissForest | XGBoost | 0.6735 | 0.6841 | 0.9250 | 133.1 |
-| MICE | XGBoost | 0.6709 | 0.6823 | 0.9241 | 51.7 |
+| Media | XGBoost | 0.6941 | 0.7060 | 0.9394 | 62.2 |
+| NoImpute | XGBoost | 0.6941 | 0.7059 | 0.9394 | 62.6 |
+| Mediana | XGBoost | 0.6940 | 0.7058 | 0.9392 | 58.7 |
+| MICE | XGBoost | 0.6938 | 0.7056 | 0.9390 | 127.5 |
+| MICE_XGBoost | XGBoost | 0.6933 | 0.7051 | 0.9389 | 271.9 |
+| kNN | XGBoost | 0.6931 | 0.7049 | 0.9387 | 2194.0 |
 
 ### Media por classificador (sobre todos os imputadores)
 
 | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
 |:---|---:|---:|---:|---:|
-| XGBoost | 0.6749 | 0.6853 | 0.9254 | 100.2 |
-| cuML_RF | 0.6668 | 0.6583 | 0.9090 | 67.1 |
-| cuML_SVM | 0.5303 | 0.5114 | 0.7763 | 87.1 |
+| XGBoost | 0.6936 | 0.7054 | 0.9390 | 506.9 |
+| CatBoost | 0.6795 | 0.6923 | 0.9336 | 121.1 |
+| cuML_RF | 0.6869 | 0.6791 | 0.9206 | 529.8 |
+| cuML_SVM | 0.5139 | 0.4950 | 0.7663 | 555.3 |
 
 ### Testes estatisticos
 
-Friedman (global, 18 combinacoes):
+Friedman (global, 20 combinacoes):
 
-- `f1_weighted`: estatistica `46.7697`, `p=7.40e-05` (significativo)
-- `auc_weighted`: estatistica `47.2023`, `p=6.33e-05` (significativo)
+- `f1_weighted`: estatistica `55.5894`, `p=1.89e-05` (significativo)
+- `auc_weighted`: estatistica `56.1613`, `p=1.54e-05` (significativo)
 
 Post-hoc Wilcoxon pareado com Bonferroni:
 
@@ -247,14 +248,14 @@ Post-hoc Wilcoxon pareado com Bonferroni:
 
 | Classe | Precision | Recall | F1-Score | Support |
 |:---|:---|:---|:---|---:|
-| 0 | 0.5164 +- 0.0126 | 0.6453 +- 0.0249 | 0.5731 +- 0.0024 | 2055 |
-| 1 | 0.6990 +- 0.0050 | 0.6305 +- 0.0140 | 0.6628 +- 0.0057 | 7542 |
-| 2 | 0.4119 +- 0.0028 | 0.5050 +- 0.0194 | 0.4536 +- 0.0094 | 3376 |
-| 3 | 0.3625 +- 0.0061 | 0.4719 +- 0.0108 | 0.4098 +- 0.0005 | 2804 |
-| 4 | 0.6827 +- 0.0037 | 0.6446 +- 0.0101 | 0.6630 +- 0.0048 | 6382 |
-| 88 | 0.9255 +- 0.0027 | 0.8397 +- 0.0088 | 0.8805 +- 0.0050 | 11174 |
-| macro avg | 0.5996 +- 0.0010 | 0.6228 +- 0.0038 | 0.6072 +- 0.0001 | 33333 |
-| weighted avg | 0.7031 +- 0.0014 | 0.6782 +- 0.0032 | 0.6878 +- 0.0021 | 33333 |
+| 0 | 0.4940 +- 0.0114 | 0.7283 +- 0.0023 | 0.5886 +- 0.0074 | 20553 |
+| 1 | 0.7452 +- 0.0014 | 0.6121 +- 0.0100 | 0.6721 +- 0.0063 | 75418 |
+| 2 | 0.4316 +- 0.0056 | 0.5404 +- 0.0018 | 0.4799 +- 0.0039 | 33760 |
+| 3 | 0.3752 +- 0.0079 | 0.5423 +- 0.0015 | 0.4434 +- 0.0053 | 28043 |
+| 4 | 0.7210 +- 0.0053 | 0.6504 +- 0.0069 | 0.6839 +- 0.0061 | 63822 |
+| 88 | 0.9465 +- 0.0013 | 0.8528 +- 0.0097 | 0.8972 +- 0.0059 | 111737 |
+| macro avg | 0.6189 +- 0.0053 | 0.6544 +- 0.0041 | 0.6275 +- 0.0058 | 333333 |
+| weighted avg | 0.7297 +- 0.0035 | 0.6941 +- 0.0067 | 0.7060 +- 0.0059 | 333333 |
 
 ## Figuras (geradas automaticamente)
 
@@ -327,7 +328,7 @@ python main.py --step all --config config/config.yaml
 
 ## Limitacoes atuais
 
-- Nesta rodada (`hybrid`, `n=100000`), houve 1 falha por memoria GPU (`CUDA out_of_memory`) em `MICE_XGBoost + cuML_SVM`.
+- Nesta rodada (`hybrid`, `n=1000000`), nao houve falhas de fold, mas metodos com imputacao pesada (principalmente `kNN` e `MissForest`) elevaram bastante o tempo total.
 - Com `n_outer_folds=3`, os testes post-hoc tem baixo poder estatistico.
 - A qualidade final depende diretamente da qualidade do dicionario de codigos e da consistencia da base de origem.
 
