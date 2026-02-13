@@ -11,6 +11,11 @@ Este repositorio implementa um pipeline completo em 4 etapas:
 3. `classify`: classificacao com validacao cruzada aninhada e tuning de hiperparametros.
 4. `analyze`: consolidacao de metricas, testes estatisticos, tabelas e figuras.
 
+Analises complementares (pos-pipeline) tambem estao disponiveis:
+
+- `imputation_effect_stats`: inferencia pareada para quantificar o efeito da imputacao no desempenho.
+- `ordinal_sensitivity`: metricas ordinais e sensibilidade com/sem classe `88`.
+
 ## Objetivo
 
 Avaliar combinacoes de:
@@ -46,7 +51,9 @@ sobre as metricas:
 |   |-- data_preparation.py
 |   |-- run_imputation.py
 |   |-- run_classification.py
-|   `-- run_analysis.py
+|   |-- run_analysis.py
+|   |-- run_imputation_effect_stats.py
+|   `-- run_ordinal_sensitivity.py
 `-- main.py
 ```
 
@@ -132,6 +139,26 @@ python main.py --runtime-mode hybrid --n-sample 1000000 --tune-max-samples 60000
 python main.py --runtime-mode fast --n-sample 1000000
 ```
 
+Analises complementares (nao exigem rerodar `prepare/impute/classify` se os artefatos ja existem):
+
+```bash
+# efeito da imputacao na metrica principal
+python src/run_imputation_effect_stats.py --metric f1_weighted
+
+# sensibilidade ordinal com/sem classe 88
+python src/run_ordinal_sensitivity.py
+```
+
+Parametros uteis:
+
+```bash
+# margem pratica de equivalencia de 0.5 p.p.
+python src/run_imputation_effect_stats.py --metric f1_weighted --equivalence-margin 0.005
+
+# trocar baseline e numero de bootstraps
+python src/run_ordinal_sensitivity.py --baseline NoImpute --bootstrap-iters 5000
+```
+
 ## O que cada etapa faz
 
 ### 1) `prepare` (`src/data_preparation.py`)
@@ -180,6 +207,30 @@ python main.py --runtime-mode fast --n-sample 1000000
 - Executa Friedman + Wilcoxon com correcao Bonferroni
 - Produz tabelas `.csv` e `.tex`
 - Gera figuras em PNG/PDF
+
+### 5) `imputation_effect_stats` (`src/run_imputation_effect_stats.py`)
+
+- Le `results/raw/all_results.csv` (nivel fold)
+- Compara imputadores de forma pareada nos mesmos blocos (`classifier`, `fold`)
+- Reporta:
+  - `delta_mean`, `delta_median`, IC bootstrap
+  - Wilcoxon pareado + correcao Holm
+  - tamanho de efeito (`cohen_dz`, `rank_biserial`)
+  - testes de equivalencia (TOST) e nao-inferioridade
+- Salva em `results/tables/imputation_effect/`
+
+### 6) `ordinal_sensitivity` (`src/run_ordinal_sensitivity.py`)
+
+- Le `results/raw/all_results_detailed.json` e `results/tables/metadata.json`
+- Calcula metricas ordinais por fold a partir da matriz de confusao:
+  - `qwk` (quadratic weighted kappa)
+  - `mae_distance`, `rmse_distance`
+  - `severe_error_rate` (erro com distancia >= 2)
+  - `within_one_rate`
+- Executa dois cenarios:
+  - `all_classes`
+  - `without_88` (remove a classe codificada de `88`)
+- Salva em `results/tables/ordinal_sensitivity/`
 
 ## Resultados desta execucao
 
@@ -244,6 +295,74 @@ Post-hoc Wilcoxon pareado com Bonferroni:
 - Nenhuma comparacao par-a-par ficou significativa (`p_bonf < 0.05`) nos arquivos atuais.
 - Contexto: ha apenas 3 folds externos, o que reduz poder estatistico no post-hoc.
 
+### Efeito da imputacao (`results/tables/imputation_effect/`)
+
+Configuracao desta rodada (manifesto em `results/tables/imputation_effect/manifest_f1_weighted.json`):
+
+- metrica: `f1_weighted`
+- `alpha=0.05`
+- margem de equivalencia: `0.005` (0.5 p.p.)
+- bootstrap: `1000` iteracoes
+- baseline: `NoImpute`
+
+Resumo global:
+
+- Comparacoes pareadas globais entre imputadores: `21`
+- Menor `p_wilcoxon_holm`: `0.0820` (nenhuma comparacao significativa apos Holm)
+- Maior diferenca media absoluta entre imputadores (`delta_mean`): `0.0052` (~0.52 p.p.)
+
+Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=3`):
+
+| imputer | delta_mean F1 vs NoImpute | IC95% bootstrap | p_wilcoxon_holm | equivalente (TOST, margem=0.005) |
+|:---|---:|:---|---:|:---:|
+| Media | +0.000076 | [-0.000321, +0.000483] | 1.0000 | Sim |
+| Mediana | -0.000090 | [-0.000415, +0.000413] | 1.0000 | Sim |
+| MICE | -0.000319 | [-0.000885, -0.000017] | 1.0000 | Sim |
+| MICE_XGBoost | -0.000743 | [-0.001431, -0.000188] | 1.0000 | Sim |
+| kNN | -0.000982 | [-0.001700, -0.000213] | 1.0000 | Sim |
+| MissForest | -0.001099 | [-0.001415, -0.000500] | 1.0000 | Sim |
+
+Leitura direta para o objetivo do projeto:
+
+- Nesta execucao, nao houve evidencia de ganho estatisticamente robusto de imputacao sobre `NoImpute`.
+- As diferencas observadas ficaram pequenas em magnitude pratica (ordem de milesimos de F1).
+
+### Sensibilidade ordinal e classe 88 (`results/tables/ordinal_sensitivity/`)
+
+Configuracao desta rodada (manifesto em `results/tables/ordinal_sensitivity/manifest_ordinal.json`):
+
+- baseline: `NoImpute`
+- `alpha=0.05`
+- margem de equivalencia em QWK: `0.005`
+- bootstrap: `1000` iteracoes
+- mapeamento alvo: `88 -> 5`
+
+Melhor QWK por cenario:
+
+| scenario | melhor combinacao | qwk_mean |
+|:---|:---|---:|
+| all_classes | `NoImpute + XGBoost` | 0.7864 |
+| without_88 | `NoImpute + XGBoost` | 0.6754 |
+
+Media por classificador (QWK), com e sem `88`:
+
+| classifier | QWK all_classes | QWK without_88 | delta (without_88 - all_classes) |
+|:---|---:|---:|---:|
+| XGBoost | 0.7858 | 0.6750 | -0.1108 |
+| CatBoost | 0.7689 | 0.6562 | -0.1127 |
+| cuML_RF | 0.7440 | 0.6642 | -0.0799 |
+| cuML_SVM | 0.4913 | 0.4578 | -0.0335 |
+
+Inferencia ordinal:
+
+- `ordinal_qwk_pairwise.csv`: nenhuma comparacao significativa apos Holm.
+- `ordinal_qwk_baseline.csv`: nenhuma comparacao significativa apos Holm.
+
+Leitura direta:
+
+- Remover a classe `88` altera substancialmente a dificuldade do problema e reduz QWK em todos os classificadores.
+- Mesmo no cenario ordinal, as diferencas entre imputadores permaneceram pequenas nesta rodada.
+
 ### Relatorio por classe do melhor modelo (Media + XGBoost)
 
 | Classe | Precision | Recall | F1-Score | Support |
@@ -305,6 +424,18 @@ Tabelas (`results/tables/`):
 - `stat_wilcoxon_*.csv`
 - `metadata.json`
 - `missing_report_raw.csv`, `missing_report_pre_filter.csv` e `missing_report_post_filter.csv`
+- `imputation_effect/`
+  - `pairwise_global_f1_weighted.csv`
+  - `pairwise_by_classifier_f1_weighted.csv`
+  - `baseline_global_f1_weighted.csv`
+  - `baseline_by_classifier_f1_weighted.csv`
+  - `manifest_f1_weighted.json`
+- `ordinal_sensitivity/`
+  - `ordinal_metrics_by_fold.csv`
+  - `ordinal_metrics_summary.csv`
+  - `ordinal_qwk_pairwise.csv`
+  - `ordinal_qwk_baseline.csv`
+  - `manifest_ordinal.json`
 
 Resultados brutos (`results/raw/`):
 
@@ -331,6 +462,14 @@ python main.py --step all --config config/config.yaml
 - Nesta rodada (`hybrid`, `n=1000000`), nao houve falhas de fold, mas metodos com imputacao pesada (principalmente `kNN` e `MissForest`) elevaram bastante o tempo total.
 - Com `n_outer_folds=3`, os testes post-hoc tem baixo poder estatistico.
 - A qualidade final depende diretamente da qualidade do dicionario de codigos e da consistencia da base de origem.
+- As analises de efeito e sensibilidade foram executadas com `bootstrap=1000`; para estimativas mais estaveis, recomenda-se `>=5000`.
+
+## Discussao e implicacoes
+
+- Pergunta central: "imputacao melhora a classificacao?". Nesta execucao, a resposta e "nao de forma clara": as diferencas de F1 foram pequenas e sem significancia apos correcao multipla.
+- Do ponto de vista pratico-operacional, imputadores complexos aumentaram tempo computacional sem ganho consistente de desempenho.
+- A analise ordinal mostrou que a presenca/ausencia da classe `88` muda fortemente o nivel absoluto de desempenho. Portanto, qualquer conclusao sobre "melhor imputador" deve explicitar o cenario (`all_classes` vs `without_88`).
+- Para publicacao, a conclusao fica mais defensavel ao reportar ambos: efeito preditivo global (F1/AUC) e estabilidade ordinal (QWK + erros por distancia).
 
 ## Proximos passos sugeridos
 
