@@ -95,8 +95,8 @@ Parametros mais importantes:
 - `data.target_col: ESTADIAM`
 - `data.valid_classes: [0,1,2,3,4,88]`
 - `data.missing_threshold: 0.60`
-- `cv.n_outer_folds: 3`
-- `cv.n_inner_folds: 3`
+- `cv.n_outer_folds: 5`
+- `cv.n_inner_folds: 5`
 - `classification.tuning.scoring: f1_weighted`
 
 ## Como executar
@@ -195,7 +195,7 @@ python src/run_ordinal_sensitivity.py --baseline NoImpute --bootstrap-iters 5000
   - `hybrid`: tuning em subset estratificado (mais rapido), com refit no treino completo
   - `fast`: sem tuning, com hiperparametros fixos predefinidos
 - Calcula metricas por fold
-- Gera checkpoint incremental (`results/raw/checkpoint_classification.json`)
+- Gera checkpoint incremental (`results/raw/checkpoint_classification_<mode>.json`)
 - Salva:
   - `results/raw/all_results.csv`
   - `results/raw/all_results_detailed.json`
@@ -241,59 +241,59 @@ Baseados nos artefatos atuais em `results/`.
 - Shape original: `5,399,686 x 47`
 - Apos filtro de data (2013-2023): `3,211,670`
 - Apos filtro de classes alvo: `1,586,358`
-- Shape final amostrado: `1,000,000 x 25`
+- Shape final amostrado: `1,586,358 x 25` (todos os registros validos)
 - Classes finais (encoded): `0->0`, `1->1`, `2->2`, `3->3`, `4->4`, `88->5`
 
 Distribuicao de classes na amostra final (`y_prepared`):
 
 | target | count |
 |---:|---:|
-| 0 | 61659 |
-| 1 | 226253 |
-| 2 | 101279 |
-| 3 | 84130 |
-| 4 | 191467 |
-| 5 | 335212 |
+| 0 | 97814 |
+| 1 | 358918 |
+| 2 | 160664 |
+| 3 | 133461 |
+| 4 | 303735 |
+| 5 | 531766 |
 
 ### Cobertura experimental
 
-- Runtime desta rodada: `hybrid` (`n_sample=1000000`, `tune_max_samples=60000`)
+- Runtime desta rodada: `hybrid` (`n_sample=999999999`, `tune_max_samples=20000`, `inner_folds=2`)
 - Combinacoes avaliadas em `summary.csv`: `20` (`18` principais + `2` baselines: `NoImpute + XGBoost` e `RawSemEncoding + CatBoost`)
-- Folds esperados: `60` (`20 x 3`)
-- Folds validos com metricas: `60`
+- Folds esperados: `100` (`20 x 5`)
+- Folds validos com metricas: `100`
 - Falhas: `0`
 
 ### Top combinacoes (ordenado por `f1_weighted_mean`)
 
 | imputer | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
 |:---|:---|---:|---:|---:|---:|
-| Media | XGBoost | 0.6941 | 0.7060 | 0.9394 | 62.2 |
-| NoImpute | XGBoost | 0.6941 | 0.7059 | 0.9394 | 62.6 |
-| Mediana | XGBoost | 0.6940 | 0.7058 | 0.9392 | 58.7 |
-| MICE | XGBoost | 0.6938 | 0.7056 | 0.9390 | 127.5 |
-| MICE_XGBoost | XGBoost | 0.6933 | 0.7051 | 0.9389 | 271.9 |
-| kNN | XGBoost | 0.6931 | 0.7049 | 0.9387 | 2194.0 |
+| MICE_XGBoost | XGBoost | 0.6903 | 0.7028 | 0.9380 | 426.6 |
+| MissForest | XGBoost | 0.6902 | 0.7028 | 0.9380 | 1473.8 |
+| Media | XGBoost | 0.6895 | 0.7021 | 0.9376 | 55.0 |
+| Mediana | XGBoost | 0.6895 | 0.7021 | 0.9376 | 55.1 |
+| kNN | XGBoost | 0.6893 | 0.7020 | 0.9377 | 3679.0 |
+| NoImpute | XGBoost | 0.6873 | 0.7002 | 0.9368 | 53.3 |
 
 ### Media por classificador (sobre todos os imputadores)
 
 | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
 |:---|---:|---:|---:|---:|
-| XGBoost | 0.6936 | 0.7054 | 0.9390 | 506.9 |
-| CatBoost | 0.6795 | 0.6923 | 0.9336 | 121.1 |
-| cuML_RF | 0.6869 | 0.6791 | 0.9206 | 529.8 |
-| cuML_SVM | 0.5139 | 0.4950 | 0.7663 | 555.3 |
+| XGBoost | 0.6888 | 0.7015 | 0.9374 | 845.4 |
+| CatBoost | 0.6817 | 0.6944 | 0.9343 | 119.8 |
+| cuML_RF | 0.6886 | 0.6815 | 0.9218 | 934.6 |
+| cuML_SVM | 0.5086 | 0.4841 | 0.7661 | 958.7 |
 
 ### Testes estatisticos
 
 Friedman (global, 20 combinacoes):
 
-- `f1_weighted`: estatistica `55.5894`, `p=1.89e-05` (significativo)
-- `auc_weighted`: estatistica `56.1613`, `p=1.54e-05` (significativo)
+- `f1_weighted`: estatistica `89.7168`, `p=3.72e-11` (significativo)
+- `auc_weighted`: estatistica `89.9634`, `p=3.37e-11` (significativo)
 
 Post-hoc Wilcoxon pareado com Bonferroni:
 
 - Nenhuma comparacao par-a-par ficou significativa (`p_bonf < 0.05`) nos arquivos atuais.
-- Contexto: ha apenas 3 folds externos, o que reduz poder estatistico no post-hoc.
+- Menor `p_bonf` observado: `1.0` (F1 e AUC).
 
 ### Efeito da imputacao (`results/tables/imputation_effect/`)
 
@@ -302,79 +302,48 @@ Configuracao desta rodada (manifesto em `results/tables/imputation_effect/manife
 - metrica: `f1_weighted`
 - `alpha=0.05`
 - margem de equivalencia: `0.005` (0.5 p.p.)
-- bootstrap: `1000` iteracoes
+- bootstrap: `5000` iteracoes
 - baseline: `NoImpute`
 
 Resumo global:
 
 - Comparacoes pareadas globais entre imputadores: `21`
-- Menor `p_wilcoxon_holm`: `0.0820` (nenhuma comparacao significativa apos Holm)
-- Maior diferenca media absoluta entre imputadores (`delta_mean`): `0.0052` (~0.52 p.p.)
+- Menor `p_wilcoxon_holm`: `1.0` (nenhuma comparacao significativa apos Holm)
+- Maior diferenca media absoluta entre imputadores (`delta_mean`): `0.0056` (~0.56 p.p.)
 
-Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=3`):
+Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=5`):
 
 | imputer | delta_mean F1 vs NoImpute | IC95% bootstrap | p_wilcoxon_holm | equivalente (TOST, margem=0.005) |
 |:---|---:|:---|---:|:---:|
-| Media | +0.000076 | [-0.000321, +0.000483] | 1.0000 | Sim |
-| Mediana | -0.000090 | [-0.000415, +0.000413] | 1.0000 | Sim |
-| MICE | -0.000319 | [-0.000885, -0.000017] | 1.0000 | Sim |
-| MICE_XGBoost | -0.000743 | [-0.001431, -0.000188] | 1.0000 | Sim |
-| kNN | -0.000982 | [-0.001700, -0.000213] | 1.0000 | Sim |
-| MissForest | -0.001099 | [-0.001415, -0.000500] | 1.0000 | Sim |
+| Media | +0.001903 | [-0.000923, +0.007034] | 1.0000 | Nao |
+| Mediana | +0.001898 | [-0.000927, +0.006971] | 1.0000 | Nao |
+| MICE | -0.001910 | [-0.002328, -0.001509] | 0.3750 | Sim |
+| MICE_XGBoost | +0.002648 | [-0.001440, +0.010287] | 1.0000 | Nao |
+| kNN | +0.001762 | [-0.002672, +0.009839] | 1.0000 | Nao |
+| MissForest | +0.002561 | [-0.001791, +0.010483] | 1.0000 | Nao |
 
 Leitura direta para o objetivo do projeto:
 
 - Nesta execucao, nao houve evidencia de ganho estatisticamente robusto de imputacao sobre `NoImpute`.
-- As diferencas observadas ficaram pequenas em magnitude pratica (ordem de milesimos de F1).
+- As diferencas observadas ficaram pequenas em magnitude pratica (ordem de milesimos de F1), com aumento de custo para imputadores mais pesados.
 
 ### Sensibilidade ordinal e classe 88 (`results/tables/ordinal_sensitivity/`)
 
-Configuracao desta rodada (manifesto em `results/tables/ordinal_sensitivity/manifest_ordinal.json`):
+- Nesta rodada, os artefatos de `ordinal_sensitivity` nao foram gerados.
+- Para reproduzir essa analise: `python src/run_ordinal_sensitivity.py`.
 
-- baseline: `NoImpute`
-- `alpha=0.05`
-- margem de equivalencia em QWK: `0.005`
-- bootstrap: `1000` iteracoes
-- mapeamento alvo: `88 -> 5`
-
-Melhor QWK por cenario:
-
-| scenario | melhor combinacao | qwk_mean |
-|:---|:---|---:|
-| all_classes | `NoImpute + XGBoost` | 0.7864 |
-| without_88 | `NoImpute + XGBoost` | 0.6754 |
-
-Media por classificador (QWK), com e sem `88`:
-
-| classifier | QWK all_classes | QWK without_88 | delta (without_88 - all_classes) |
-|:---|---:|---:|---:|
-| XGBoost | 0.7858 | 0.6750 | -0.1108 |
-| CatBoost | 0.7689 | 0.6562 | -0.1127 |
-| cuML_RF | 0.7440 | 0.6642 | -0.0799 |
-| cuML_SVM | 0.4913 | 0.4578 | -0.0335 |
-
-Inferencia ordinal:
-
-- `ordinal_qwk_pairwise.csv`: nenhuma comparacao significativa apos Holm.
-- `ordinal_qwk_baseline.csv`: nenhuma comparacao significativa apos Holm.
-
-Leitura direta:
-
-- Remover a classe `88` altera substancialmente a dificuldade do problema e reduz QWK em todos os classificadores.
-- Mesmo no cenario ordinal, as diferencas entre imputadores permaneceram pequenas nesta rodada.
-
-### Relatorio por classe do melhor modelo (Media + XGBoost)
+### Relatorio por classe do melhor modelo (MICE_XGBoost + XGBoost)
 
 | Classe | Precision | Recall | F1-Score | Support |
 |:---|:---|:---|:---|---:|
-| 0 | 0.4940 +- 0.0114 | 0.7283 +- 0.0023 | 0.5886 +- 0.0074 | 20553 |
-| 1 | 0.7452 +- 0.0014 | 0.6121 +- 0.0100 | 0.6721 +- 0.0063 | 75418 |
-| 2 | 0.4316 +- 0.0056 | 0.5404 +- 0.0018 | 0.4799 +- 0.0039 | 33760 |
-| 3 | 0.3752 +- 0.0079 | 0.5423 +- 0.0015 | 0.4434 +- 0.0053 | 28043 |
-| 4 | 0.7210 +- 0.0053 | 0.6504 +- 0.0069 | 0.6839 +- 0.0061 | 63822 |
-| 88 | 0.9465 +- 0.0013 | 0.8528 +- 0.0097 | 0.8972 +- 0.0059 | 111737 |
-| macro avg | 0.6189 +- 0.0053 | 0.6544 +- 0.0041 | 0.6275 +- 0.0058 | 333333 |
-| weighted avg | 0.7297 +- 0.0035 | 0.6941 +- 0.0067 | 0.7060 +- 0.0059 | 333333 |
+| 0 | 0.4816 +- 0.0080 | 0.7358 +- 0.0038 | 0.5821 +- 0.0055 | 19563 |
+| 1 | 0.7473 +- 0.0029 | 0.6063 +- 0.0040 | 0.6694 +- 0.0035 | 71784 |
+| 2 | 0.4316 +- 0.0042 | 0.5413 +- 0.0018 | 0.4803 +- 0.0032 | 32133 |
+| 3 | 0.3719 +- 0.0050 | 0.5516 +- 0.0035 | 0.4442 +- 0.0046 | 26692 |
+| 4 | 0.7213 +- 0.0055 | 0.6439 +- 0.0057 | 0.6804 +- 0.0056 | 60747 |
+| 88 | 0.9459 +- 0.0012 | 0.8450 +- 0.0084 | 0.8926 +- 0.0052 | 106353 |
+| macro avg | 0.6166 +- 0.0043 | 0.6540 +- 0.0037 | 0.6248 +- 0.0045 | 317272 |
+| weighted avg | 0.7289 +- 0.0033 | 0.6903 +- 0.0051 | 0.7028 +- 0.0046 | 317272 |
 
 ## Figuras (geradas automaticamente)
 
@@ -430,7 +399,7 @@ Tabelas (`results/tables/`):
   - `baseline_global_f1_weighted.csv`
   - `baseline_by_classifier_f1_weighted.csv`
   - `manifest_f1_weighted.json`
-- `ordinal_sensitivity/`
+- `ordinal_sensitivity/` (quando executado)
   - `ordinal_metrics_by_fold.csv`
   - `ordinal_metrics_summary.csv`
   - `ordinal_qwk_pairwise.csv`
@@ -441,8 +410,8 @@ Resultados brutos (`results/raw/`):
 
 - `all_results.csv`
 - `all_results_detailed.json`
-- `checkpoint_classification.json`
-- Para modos nao-default: `all_results_<mode>.csv`, `all_results_detailed_<mode>.json`, `checkpoint_classification_<mode>.json`
+- `checkpoint_classification_<mode>.json` (ex.: `checkpoint_classification_hybrid.json`)
+- Para modos nao-default: `all_results_<mode>.csv`, `all_results_detailed_<mode>.json`
 - `tempos_imputacao.json`
 - `experiment.log`
 - `pip_freeze.txt`
@@ -459,20 +428,22 @@ python main.py --step all --config config/config.yaml
 
 ## Limitacoes atuais
 
-- Nesta rodada (`hybrid`, `n=1000000`), nao houve falhas de fold, mas metodos com imputacao pesada (principalmente `kNN` e `MissForest`) elevaram bastante o tempo total.
-- Com `n_outer_folds=3`, os testes post-hoc tem baixo poder estatistico.
+- Nesta rodada (`hybrid`, `n efetivo=1,586,358`), nao houve falhas de fold, mas metodos com imputacao pesada (principalmente `kNN` e `MissForest`) elevaram bastante o tempo total.
+- Mesmo com `n_outer_folds=5`, os testes post-hoc com correcao multipla permaneceram sem significancia entre pares.
 - A qualidade final depende diretamente da qualidade do dicionario de codigos e da consistencia da base de origem.
-- As analises de efeito e sensibilidade foram executadas com `bootstrap=1000`; para estimativas mais estaveis, recomenda-se `>=5000`.
+- A analise de efeito foi executada com `bootstrap=5000`; para estimativas ainda mais estaveis, pode-se aumentar esse valor.
+- A analise `ordinal_sensitivity` nao foi executada nesta rodada.
 
 ## Discussao e implicacoes
 
 - Pergunta central: "imputacao melhora a classificacao?". Nesta execucao, a resposta e "nao de forma clara": as diferencas de F1 foram pequenas e sem significancia apos correcao multipla.
-- Do ponto de vista pratico-operacional, imputadores complexos aumentaram tempo computacional sem ganho consistente de desempenho.
-- A analise ordinal mostrou que a presenca/ausencia da classe `88` muda fortemente o nivel absoluto de desempenho. Portanto, qualquer conclusao sobre "melhor imputador" deve explicitar o cenario (`all_classes` vs `without_88`).
-- Para publicacao, a conclusao fica mais defensavel ao reportar ambos: efeito preditivo global (F1/AUC) e estabilidade ordinal (QWK + erros por distancia).
+- Do ponto de vista pratico-operacional, o melhor F1 desta rodada (`MICE_XGBoost + XGBoost`) veio com custo computacional bem maior que variantes simples (`Media/Mediana + XGBoost`) e sem evidencia estatistica robusta de superioridade.
+- Como `ordinal_sensitivity` nao foi gerado nesta rodada, a conclusao atual cobre apenas metricas classicas (F1/AUC/Accuracy/Recall).
+- Para consolidar uma conclusao metodologica mais forte, recomenda-se reportar em conjunto o efeito preditivo global e a estabilidade ordinal.
 
 ## Proximos passos sugeridos
 
-- Aumentar `n_outer_folds` (ex.: 5) para fortalecer inferencia estatistica.
+- Executar `python src/run_ordinal_sensitivity.py` para fechar a analise com metricas ordinais.
+- Aumentar `n_outer_folds` (ex.: 7) ou usar repeticoes de CV para fortalecer inferencia estatistica.
 - Testar calibracao de probabilidades para AUC multiclasses.
 - Executar analises estratificadas por subgrupos clinicos quando aplicavel.

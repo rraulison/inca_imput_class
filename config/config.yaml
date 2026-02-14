@@ -71,8 +71,8 @@ data:
     - VALOR_TOT
 
 cv:
-  n_outer_folds: 3
-  n_inner_folds: 3
+  n_outer_folds: 5
+  n_inner_folds: 5
 
 imputation:
   imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest, NoImpute]
