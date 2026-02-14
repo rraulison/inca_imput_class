@@ -329,8 +329,40 @@ Leitura direta para o objetivo do projeto:
 
 ### Sensibilidade ordinal e classe 88 (`results/tables/ordinal_sensitivity/`)
 
-- Nesta rodada, os artefatos de `ordinal_sensitivity` nao foram gerados.
-- Para reproduzir essa analise: `python src/run_ordinal_sensitivity.py`.
+Configuracao desta rodada (manifesto em `results/tables/ordinal_sensitivity/manifest_ordinal.json`):
+
+- baseline: `NoImpute`
+- `alpha=0.05`
+- margem de equivalencia em QWK: `0.005`
+- bootstrap: `5000` iteracoes
+- mapeamento alvo: `88 -> 5`
+- linhas fold-level avaliadas: `200`
+
+Melhor QWK por cenario:
+
+| scenario | melhor combinacao | qwk_mean |
+|:---|:---|---:|
+| all_classes | `MICE_XGBoost + XGBoost` | 0.7808 |
+| without_88 | `MICE_XGBoost + XGBoost` | 0.6719 |
+
+Media por classificador (QWK), com e sem `88`:
+
+| classifier | QWK all_classes | QWK without_88 | delta (without_88 - all_classes) |
+|:---|---:|---:|---:|
+| XGBoost | 0.7787 | 0.6696 | -0.1091 |
+| CatBoost | 0.7704 | 0.6575 | -0.1129 |
+| cuML_RF | 0.7451 | 0.6659 | -0.0791 |
+| cuML_SVM | 0.4826 | 0.4370 | -0.0456 |
+
+Inferencia ordinal:
+
+- `ordinal_qwk_pairwise.csv`: nenhuma comparacao significativa apos Holm (`p_wilcoxon_holm` minimo = `0.9375`).
+- `ordinal_qwk_baseline.csv`: nenhuma comparacao significativa apos Holm (`p_wilcoxon_holm` minimo = `0.3750`).
+
+Leitura direta:
+
+- Remover a classe `88` reduz o QWK absoluto em todos os classificadores nesta rodada.
+- Mesmo no cenario ordinal, nao houve evidencia de superioridade robusta entre imputadores apos correcao multipla.
 
 ### Relatorio por classe do melhor modelo (MICE_XGBoost + XGBoost)
 
@@ -399,7 +431,7 @@ Tabelas (`results/tables/`):
   - `baseline_global_f1_weighted.csv`
   - `baseline_by_classifier_f1_weighted.csv`
   - `manifest_f1_weighted.json`
-- `ordinal_sensitivity/` (quando executado)
+- `ordinal_sensitivity/`
   - `ordinal_metrics_by_fold.csv`
   - `ordinal_metrics_summary.csv`
   - `ordinal_qwk_pairwise.csv`
@@ -432,18 +464,18 @@ python main.py --step all --config config/config.yaml
 - Mesmo com `n_outer_folds=5`, os testes post-hoc com correcao multipla permaneceram sem significancia entre pares.
 - A qualidade final depende diretamente da qualidade do dicionario de codigos e da consistencia da base de origem.
 - A analise de efeito foi executada com `bootstrap=5000`; para estimativas ainda mais estaveis, pode-se aumentar esse valor.
-- A analise `ordinal_sensitivity` nao foi executada nesta rodada.
+- A analise `ordinal_sensitivity` tambem foi executada com `bootstrap=5000` e nao mostrou diferencas robustas entre imputadores apos Holm.
 
 ## Discussao e implicacoes
 
 - Pergunta central: "imputacao melhora a classificacao?". Nesta execucao, a resposta e "nao de forma clara": as diferencas de F1 foram pequenas e sem significancia apos correcao multipla.
 - Do ponto de vista pratico-operacional, o melhor F1 desta rodada (`MICE_XGBoost + XGBoost`) veio com custo computacional bem maior que variantes simples (`Media/Mediana + XGBoost`) e sem evidencia estatistica robusta de superioridade.
-- Como `ordinal_sensitivity` nao foi gerado nesta rodada, a conclusao atual cobre apenas metricas classicas (F1/AUC/Accuracy/Recall).
+- No recorte ordinal (QWK), o padrao se manteve: variacoes pequenas entre imputadores e ausencia de significancia apos ajuste multiplo.
 - Para consolidar uma conclusao metodologica mais forte, recomenda-se reportar em conjunto o efeito preditivo global e a estabilidade ordinal.
 
 ## Proximos passos sugeridos
 
-- Executar `python src/run_ordinal_sensitivity.py` para fechar a analise com metricas ordinais.
 - Aumentar `n_outer_folds` (ex.: 7) ou usar repeticoes de CV para fortalecer inferencia estatistica.
+- Aumentar `bootstrap` (ex.: `10000`) nas analises inferenciais para reduzir incerteza dos ICs.
 - Testar calibracao de probabilidades para AUC multiclasses.
 - Executar analises estratificadas por subgrupos clinicos quando aplicavel.
