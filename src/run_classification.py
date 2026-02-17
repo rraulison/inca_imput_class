@@ -610,6 +610,80 @@ def _ordered_config_classifiers(cfg):
     return front + tail
 
 
+def _task_key(runtime_mode, imputer, fold, classifier):
+    return f"{runtime_mode}__{imputer}__{int(fold)}__{classifier}"
+
+
+def _planned_task_keys(runtime_mode, tasks):
+    return {
+        _task_key(runtime_mode, task["imputer"], task["fold"], task["classifier"])
+        for task in tasks
+    }
+
+
+def _result_key_from_row(row, runtime_mode):
+    if not isinstance(row, dict):
+        return None
+    imputer = row.get("imputer")
+    classifier = row.get("classifier")
+    fold = row.get("fold")
+    if imputer is None or classifier is None or fold is None:
+        return None
+    try:
+        fold = int(fold)
+    except (TypeError, ValueError):
+        return None
+    mode = _normalize_runtime_mode(row.get("runtime_mode", runtime_mode))
+    return _task_key(mode, imputer, fold, classifier)
+
+
+def _prune_checkpoint_for_tasks(ckpt, runtime_mode, planned_keys):
+    mode_prefix = f"{runtime_mode}__"
+    raw_completed = {str(key) for key in ckpt.get("completed", []) if str(key).startswith(mode_prefix)}
+    raw_results = [
+        row
+        for row in ckpt.get("results", [])
+        if _normalize_runtime_mode(row.get("runtime_mode", runtime_mode)) == runtime_mode
+    ]
+
+    results_by_key = OrderedDict()
+    for row in raw_results:
+        key = _result_key_from_row(row, runtime_mode)
+        if key is None or key not in planned_keys:
+            continue
+        results_by_key[key] = row
+
+    completed = set(results_by_key.keys())
+    dropped_completed = len(raw_completed - completed)
+    dropped_results = len(raw_results) - len(results_by_key)
+    return completed, list(results_by_key.values()), dropped_completed, dropped_results
+
+
+def _resolve_classes(meta, imp_dir):
+    target_map = meta.get("target_mapping", {}) or {}
+    classes_from_map = []
+    if isinstance(target_map, dict):
+        for encoded in target_map.values():
+            try:
+                classes_from_map.append(int(encoded))
+            except (TypeError, ValueError):
+                continue
+    if classes_from_map:
+        classes = np.array(sorted(set(classes_from_map)), dtype=int)
+        return classes, "metadata.target_mapping"
+
+    n_classes_raw = meta.get("n_classes")
+    try:
+        n_classes = int(n_classes_raw)
+    except (TypeError, ValueError):
+        n_classes = 0
+    if n_classes > 0:
+        return np.arange(n_classes, dtype=int), "metadata.n_classes"
+
+    y0 = pd.read_parquet(imp_dir / "y_fold0_train.parquet")["target"]
+    return np.sort(y0.astype(int).unique()), "y_fold0_train"
+
+
 def _take_rows(X, idx):
     if isinstance(X, (pd.DataFrame, pd.Series)):
         return X.iloc[idx]
@@ -720,7 +794,7 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
 def _save_classification_checkpoint(ckpt_path, completed, all_results):
     payload = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "completed": list(completed),
+        "completed": sorted(completed),
         "results": _serialize(all_results),
     }
     with open(ckpt_path, "w", encoding="utf-8") as f:
@@ -1048,6 +1122,7 @@ def run_classification(
             )
 
     log.info("Planned tasks: %d", len(tasks))
+    planned_keys = _planned_task_keys(runtime_mode, tasks)
 
     ckpt_suffix = "" if runtime_mode == "default" else f"_{runtime_mode}"
     ckpt_path = res_dir / f"checkpoint_classification{ckpt_suffix}.json"
@@ -1066,16 +1141,29 @@ def run_classification(
             completed = set()
             all_results = []
         else:
-            mode_prefix = f"{runtime_mode}__"
-            completed = {str(key) for key in ckpt.get("completed", []) if str(key).startswith(mode_prefix)}
-            all_results = [row for row in ckpt.get("results", []) if row.get("runtime_mode") == runtime_mode]
-            log.info("Checkpoint loaded (%s): %d completed combinations", runtime_mode, len(completed))
+            completed, all_results, dropped_completed, dropped_results = _prune_checkpoint_for_tasks(
+                ckpt,
+                runtime_mode,
+                planned_keys,
+            )
+            if dropped_completed or dropped_results:
+                log.info(
+                    "Checkpoint pruned to current plan: dropped %d completed keys and %d result rows.",
+                    dropped_completed,
+                    dropped_results,
+                )
+            log.info(
+                "Checkpoint loaded (%s): %d completed combinations (%d planned).",
+                runtime_mode,
+                len(completed),
+                len(planned_keys),
+            )
     else:
         completed = set()
         all_results = []
 
-    y0 = pd.read_parquet(imp_dir / "y_fold0_train.parquet")["target"]
-    classes = np.sort(y0.unique())
+    classes, classes_source = _resolve_classes(meta, imp_dir)
+    log.info("Classes resolved from %s: %s", classes_source, classes.tolist())
 
     X_raw_all = None
     y_all = None
@@ -1101,7 +1189,7 @@ def run_classification(
         imp_name = task["imputer"]
         fold = int(task["fold"])
         clf_name = task["classifier"]
-        key = f"{runtime_mode}__{imp_name}__{fold}__{clf_name}"
+        key = _task_key(runtime_mode, imp_name, fold, clf_name)
 
         if key in completed:
             pbar.update(1)

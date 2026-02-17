@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,9 +98,10 @@ def _is_repetition_histogram_error(exc):
 
 def _read_parquet_via_helper_python(path, columns=None):
     helper_python = os.environ.get("TABICL_PARQUET_HELPER_PYTHON", sys.executable)
-    helper_python_path = Path(helper_python)
+    helper_python_resolved = shutil.which(helper_python) or helper_python
+    helper_python_path = Path(helper_python_resolved)
     if not helper_python_path.exists():
-        raise RuntimeError(f"Helper Python not found: {helper_python_path}")
+        raise RuntimeError(f"Helper Python not found: {helper_python} (resolved={helper_python_resolved})")
 
     with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         out_path = Path(tmp.name)
@@ -143,18 +145,15 @@ df.to_pickle(output_pickle)
 
 
 def _read_parquet_safe(path, columns=None):
-    """Read parquet with a single pyarrow low-level fallback.
-
-    The previous implementation had 5 nested fallback levels (Polars,
-    pyarrow.parquet, row-group recovery, helper subprocess) which masked
-    corrupted data. Now we try pandas → pyarrow low-level and fail fast.
-    """
+    """Read parquet with pandas, then low-level pyarrow, then optional helper python."""
     path = Path(path)
+    original_exc = None
     try:
         return pd.read_parquet(path, columns=columns)
     except Exception as exc:
         if not _is_repetition_histogram_error(exc):
             raise
+        original_exc = exc
 
         log.warning(
             "Parquet read failed for %s with '%s'. Retrying with low-level pyarrow.",
@@ -162,15 +161,32 @@ def _read_parquet_safe(path, columns=None):
             exc,
         )
 
+    pyarrow_exc = None
     try:
         import pyarrow.parquet as pq
 
         table = pq.read_table(path, columns=columns, use_threads=False)
         return table.to_pandas()
-    except Exception as final_exc:
-        raise RuntimeError(
-            f"Failed to read parquet file {path}. Original: {exc}. Fallback: {final_exc}"
-        ) from final_exc
+    except Exception as exc:
+        pyarrow_exc = exc
+        log.warning("Low-level pyarrow fallback failed for %s: %s", path, exc)
+
+    helper_python = os.environ.get("TABICL_PARQUET_HELPER_PYTHON")
+    if helper_python:
+        try:
+            log.info("Retrying parquet read via helper Python (%s).", helper_python)
+            return _read_parquet_via_helper_python(path, columns=columns)
+        except Exception as helper_exc:
+            raise RuntimeError(
+                f"Failed to read parquet file {path}. Original: {original_exc}. "
+                f"PyArrow fallback: {pyarrow_exc}. Helper ({helper_python}) fallback: {helper_exc}"
+            ) from helper_exc
+
+    raise RuntimeError(
+        f"Failed to read parquet file {path}. Original: {original_exc}. "
+        f"PyArrow fallback: {pyarrow_exc}. "
+        "Set TABICL_PARQUET_HELPER_PYTHON to a compatible interpreter for an additional fallback."
+    ) from pyarrow_exc
 
 
 def _take_rows(X, start, end):
