@@ -31,31 +31,9 @@ NON_INFO_LABEL_MARKERS = (
 )
 
 
-EXCLUDE_REASONS = {
-    "TNM": "LEAKAGE",
-    "OUTROESTA": "LEAKAGE",
-    "ESTADIAG": "LEAKAGE",
-    "ESTDFIMT": "LEAKAGE_POST_DIAG",
-    "ANTRI": "date",
-    "DATAINITRT": "date",
-    "DATAOBITO": "date",
-    "DATAPRICON": "date",
-    "DTDIAGNO": "date",
-    "DTTRIAGE": "date",
-    "ANOPRIDI": "date",
-    "DTPRICON": "date",
-    "DTINITRT": "date",
-    "CNES": "identifier",
-    "MUUH": "identifier",
-    "UFUH": "redundant",
-    "VALOR_TOT": "irrelevant",
-    "TPCASO": "administrative",
-    "OCUPACAO": "high_cardinality",
-    "PROCEDEN": "high_cardinality",
-    "LOCTUPRO": "high_cardinality_or_nan",
-    "CLIATEN": "administrative",
-    "CLITRAT": "administrative",
-}
+# NOTE: Feature exclusion is now driven by data.features_exclude in config.yaml.
+# The former EXCLUDE_REASONS dict was removed because it was dead code
+# (never referenced by any function) and created a false sense of safety.
 
 
 def _missing_report(df, missing_rules=None):
@@ -105,10 +83,17 @@ def _is_non_informative_label(label):
 
 
 def _load_missing_rules(dict_path):
-    """Load per-column dictionary rules for codes that should be treated as missing."""
+    """Load per-column dictionary rules for codes that should be treated as missing.
+
+    Raises FileNotFoundError if the dictionary JSON is absent, since
+    the pipeline depends on it for correct NaN handling of non-informative codes.
+    """
     if not dict_path.exists():
-        log.warning("Data dictionary not found: %s", dict_path)
-        return {}
+        raise FileNotFoundError(
+            f"Data dictionary not found: {dict_path}. "
+            f"This file is required to properly mask non-informative codes as NaN. "
+            f"Please provide '''config/dicionario_valores_validos.json'''."
+        )
 
     with open(dict_path, "r", encoding="utf-8") as f:
         dictionary = json.load(f)
@@ -181,8 +166,9 @@ def _replace_missing_with_nan(df, missing_rules):
     return replaced
 
 
-def prepare_data(df, config_path="config/config.yaml"):
-    cfg = load_config(config_path)
+def prepare_data(df: "pd.DataFrame", config_path: str = "config/config.yaml", cfg: dict = None) -> None:
+    if cfg is None:
+        cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
     data_cfg = cfg["data"]
     paths = cfg["paths"]
@@ -199,6 +185,15 @@ def prepare_data(df, config_path="config/config.yaml"):
     # listed in both safe and high-cardinality config groups.
     all_features = list(dict.fromkeys(data_cfg["features_safe"] + data_cfg["features_high_cardinality"]))
     all_features = [f for f in all_features if f in df.columns]
+
+    # BUG-5 fix: apply features_exclude from config (previously this key was
+    # defined in config.yaml but never read by the code).
+    features_exclude = set(data_cfg.get("features_exclude", []))
+    if features_exclude:
+        excluded_here = [f for f in all_features if f in features_exclude]
+        if excluded_here:
+            log.info("Excluding features from config (data.features_exclude): %s", excluded_here)
+        all_features = [f for f in all_features if f not in features_exclude]
 
     dict_path = Path(config_path).resolve().parent / "dicionario_valores_validos.json"
     missing_rules = _load_missing_rules(dict_path)

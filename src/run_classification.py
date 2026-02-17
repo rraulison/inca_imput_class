@@ -300,20 +300,54 @@ class CuMLSVMWrapper(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, X):
         X_gpu = _to_gpu(X)
+        # 1. Prefer native predict_proba (Platt scaling when probability=True).
         if hasattr(self.model_, "predict_proba"):
             try:
-                return _to_numpy(self.model_.predict_proba(X_gpu))
+                proba = _to_numpy(self.model_.predict_proba(X_gpu))
+                if proba.ndim == 2 and proba.shape[1] == len(self.classes_):
+                    return proba
             except Exception:
                 pass
 
+        # 2. decision_function fallback: cuML SVC uses OvO, producing
+        #    n_classes*(n_classes-1)/2 scores.  Applying softmax directly
+        #    to OvO scores is wrong.  Use OvO vote-counting instead.
         if hasattr(self.model_, "decision_function"):
             try:
-                scores = self.model_.decision_function(X_gpu)
-                return _softmax(scores)
+                scores = _to_numpy(self.model_.decision_function(X_gpu))
+                n_classes = len(self.classes_)
+                if scores.ndim == 2 and scores.shape[1] == n_classes:
+                    # Rare case: output already has n_classes columns
+                    return _softmax(scores)
+                # OvO vote counting
+                proba = self._ovo_vote_proba(scores, n_classes)
+                return proba
             except Exception:
                 pass
 
+        # 3. Last resort: one-hot from hard predictions.
         return _one_hot_proba(self.predict(X), self.classes_)
+
+    @staticmethod
+    def _ovo_vote_proba(scores, n_classes):
+        """Convert OvO decision scores to class probabilities via vote counting."""
+        scores = np.asarray(scores)
+        n_samples = scores.shape[0]
+        votes = np.zeros((n_samples, n_classes), dtype=np.float64)
+        col = 0
+        for i in range(n_classes):
+            for j in range(i + 1, n_classes):
+                if col >= scores.shape[1]:
+                    break
+                # Positive score → class i wins, negative → class j wins
+                win_i = (scores[:, col] > 0).astype(float)
+                votes[:, i] += win_i
+                votes[:, j] += 1.0 - win_i
+                col += 1
+        # Normalize to probabilities
+        row_sums = votes.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        return votes / row_sums
 
 
 class CuMLMLPWrapper(BaseEstimator, ClassifierMixin):
@@ -528,12 +562,7 @@ def _serialize(obj):
     return obj
 
 
-def _fmt_time(seconds):
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.1f}min"
-    return f"{seconds / 3600:.1f}h"
+from src.stats_utils import fmt_time as _fmt_time
 
 
 def _normalize_runtime_mode(mode):
@@ -625,7 +654,8 @@ def _stratified_tuning_subset(X, y, sample_weight, max_samples, seed):
     return X_sub, y_sub, w_sub, True
 
 
-def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X, y, seed, refit_X=None, refit_y=None):
+def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X, y, seed, refit_X=None, refit_y=None, sample_weight=None, fit_kwargs=None):
+    fit_kwargs = dict(fit_kwargs or {})
     search_estimator = clone(estimator)
     if hasattr(search_estimator, "probability") and hasattr(search_estimator, "set_params"):
         # Optimization: SVC probability=True is slow (internal CV).
@@ -657,8 +687,13 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
             y_tr_fold = _take_rows(y, tr_idx)
             X_va_fold = _take_rows(X, va_idx)
             y_va_fold = _take_rows(y, va_idx)
-            
-            est.fit(X_tr_fold, y_tr_fold)
+
+            # Build fold fit kwargs: subsample sample_weight and merge fit_kwargs
+            fold_fit_kwargs = dict(fit_kwargs)
+            if sample_weight is not None:
+                fold_fit_kwargs["sample_weight"] = np.asarray(sample_weight)[tr_idx]
+
+            _fit_with_optional_weights(est, X_tr_fold, y_tr_fold, fit_kwargs=fold_fit_kwargs)
             fold_scores.append(float(scorer(est, X_va_fold, y_va_fold)))
             del est
             gc.collect()
@@ -672,7 +707,12 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
     best_estimator.set_params(**best_params)
     fit_X = X if refit_X is None else refit_X
     fit_y = y if refit_y is None else refit_y
-    best_estimator.fit(fit_X, fit_y)
+
+    # Use the full sample_weight for refitting if not using a subset
+    refit_kwargs = dict(fit_kwargs)
+    if sample_weight is not None and refit_X is None:
+        refit_kwargs["sample_weight"] = sample_weight
+    _fit_with_optional_weights(best_estimator, fit_X, fit_y, fit_kwargs=refit_kwargs)
 
     return best_estimator, best_params, best_score
 
@@ -789,6 +829,8 @@ def _evaluate_combination(
                         seed=seed + fold,
                         refit_X=Xtr if used_subset else None,
                         refit_y=ytr if used_subset else None,
+                        sample_weight=w_tune,
+                        fit_kwargs=fit_kwargs,
                     )
                 else:
                     search = RandomizedSearchCV(
@@ -885,12 +927,19 @@ def _evaluate_combination(
         }
 
 
-def run_classification(config_path="config/config.yaml", filter_imputers=None, filter_classifiers=None):
-    cfg = load_config(config_path)
+def run_classification(
+    config_path: str = "config/config.yaml",
+    filter_imputers: list = None,
+    filter_classifiers: list = None,
+    cfg: dict = None,
+) -> None:
+    if cfg is None:
+        cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
     n_outer = cfg["cv"]["n_outer_folds"]
     scoring = cfg["classification"]["tuning"]["scoring"]
-    svm_max = cfg["classification"].get("svm_max_train_samples") or 20000
+    svm_max_raw = cfg["classification"].get("svm_max_train_samples")
+    svm_max = 20000 if svm_max_raw is None else int(svm_max_raw)
 
     imp_dir = Path(cfg["paths"]["imputed_data"])
     proc_dir = Path(cfg["paths"]["processed_data"])
@@ -1140,7 +1189,7 @@ def run_classification(config_path="config/config.yaml", filter_imputers=None, f
                 del X_tr, X_te, y_tr, y_te
 
         except Exception as e:
-            log.error("%s fold%d %s failed during data assembly: %s", imp_name, fold, clf_name, e)
+            log.error("%s fold%d %s failed during data assembly: %s", imp_name, fold, clf_name, e, exc_info=True)
             traceback.print_exc()
             result = {
                 "runtime_mode": runtime_mode,

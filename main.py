@@ -48,7 +48,7 @@ def set_seed(seed=42):
     import random
 
     random.seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed)  # kept for backward compat with libs using global state
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
@@ -115,8 +115,10 @@ def apply_runtime_overrides(cfg, args, log):
 
     if args.n_sample is not None:
         cfg["experiment"]["n_sample"] = int(args.n_sample)
-    elif mode in {"hybrid", "fast"} and int(cfg["experiment"].get("n_sample", 0)) < 100000:
-        cfg["experiment"]["n_sample"] = 100000
+    elif mode in {"hybrid", "fast"}:
+        n_sample_raw = cfg["experiment"].get("n_sample")
+        if n_sample_raw is None or int(n_sample_raw) < 100000:
+            cfg["experiment"]["n_sample"] = 100000
 
     log.info(
         "Runtime mode: %s | n_sample=%s | tune_max_samples=%s",
@@ -192,7 +194,7 @@ def main():
             raise ValueError(
                 f"Unsupported input format for '{data_path_obj}'. Use .parquet, .csv or .txt."
             )
-        prepare_data(df, args.config)
+        prepare_data(df, args.config, cfg=cfg)
         del df
 
     if run_all or "impute" in steps:
@@ -200,7 +202,7 @@ def main():
         from src.run_imputation import run_imputation
 
         filter_imputers = [args.imputer] if args.imputer else None
-        run_imputation(args.config, filter_imputers=filter_imputers)
+        run_imputation(args.config, filter_imputers=filter_imputers, cfg=cfg)
 
     if run_all or "classify" in steps:
         log.info("STEP 3 - CLASSIFY")
@@ -212,13 +214,14 @@ def main():
             args.config,
             filter_imputers=filter_imputers,
             filter_classifiers=filter_classifiers,
+            cfg=cfg,
         )
 
     if run_all or "analyze" in steps:
         log.info("STEP 4 - ANALYZE")
         from src.run_analysis import run_analysis
 
-        run_analysis(args.config)
+        run_analysis(args.config, cfg=cfg)
 
     log.info("Completed at: %s", datetime.now().isoformat())
 

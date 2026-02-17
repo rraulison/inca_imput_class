@@ -17,15 +17,12 @@ Outputs are written to:
 import argparse
 import json
 import logging
-import math
 import sys
-from ast import literal_eval
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata, t, wilcoxon
 
 try:
     from src.config_loader import load_config
@@ -45,29 +42,15 @@ def _setup_logging():
     )
 
 
-def _coerce_confusion_matrix(raw_cm):
-    cm_data = raw_cm
-    if isinstance(cm_data, str):
-        try:
-            cm_data = json.loads(cm_data)
-        except Exception:
-            cm_data = literal_eval(cm_data)
-
-    cm = np.asarray(cm_data)
-    cm = np.squeeze(cm)
-
-    if cm.ndim == 1:
-        size = cm.size
-        n = int(np.sqrt(size))
-        if n * n == size:
-            cm = cm.reshape(n, n)
-        else:
-            return None
-
-    if cm.ndim != 2 or cm.shape[0] != cm.shape[1]:
-        return None
-
-    return cm.astype(float)
+from src.metrics_utils import coerce_confusion_matrix as _coerce_confusion_matrix
+from src.stats_utils import (
+    bootstrap_mean_ci as _bootstrap_mean_ci,
+    cohen_dz as _cohen_dz,
+    equivalence_and_noninferiority as _equivalence_and_noninferiority,
+    holm_adjust as _holm_adjust,
+    rank_biserial as _rank_biserial,
+    wilcoxon_two_sided as _wilcoxon_two_sided,
+)
 
 
 def _qwk_from_confusion(cm):
@@ -121,144 +104,6 @@ def _distance_metrics(cm):
         "severe_error_rate": severe,
         "within_one_rate": within_one,
     }
-
-
-def _bootstrap_mean_ci(diff, n_boot, ci_level, rng):
-    diff = np.asarray(diff, dtype=float)
-    n = len(diff)
-    if n == 0:
-        return (np.nan, np.nan)
-    if n == 1:
-        return (float(diff[0]), float(diff[0]))
-    idx = rng.integers(0, n, size=(n_boot, n))
-    means = diff[idx].mean(axis=1)
-    alpha = 1.0 - ci_level
-    low = float(np.quantile(means, alpha / 2.0))
-    high = float(np.quantile(means, 1.0 - alpha / 2.0))
-    return (low, high)
-
-
-def _wilcoxon_two_sided(diff):
-    diff = np.asarray(diff, dtype=float)
-    nz = diff[np.abs(diff) > 1e-15]
-    if len(nz) == 0:
-        return (np.nan, 1.0)
-    try:
-        stat, pval = wilcoxon(diff, alternative="two-sided", zero_method="wilcox")
-        return (float(stat), float(pval))
-    except ValueError:
-        return (np.nan, 1.0)
-
-
-def _cohen_dz(diff):
-    diff = np.asarray(diff, dtype=float)
-    if len(diff) < 2:
-        return np.nan
-    sd = np.std(diff, ddof=1)
-    mean = np.mean(diff)
-    if sd <= 1e-15:
-        if abs(mean) <= 1e-15:
-            return 0.0
-        return float(np.sign(mean) * np.inf)
-    return float(mean / sd)
-
-
-def _rank_biserial(diff):
-    diff = np.asarray(diff, dtype=float)
-    nz = diff[np.abs(diff) > 1e-15]
-    n = len(nz)
-    if n == 0:
-        return np.nan
-    ranks = rankdata(np.abs(nz), method="average")
-    r_plus = float(ranks[nz > 0].sum())
-    r_minus = float(ranks[nz < 0].sum())
-    denom = n * (n + 1) / 2.0
-    if denom == 0:
-        return np.nan
-    return float((r_plus - r_minus) / denom)
-
-
-def _equivalence_and_noninferiority(diff, margin, alpha):
-    diff = np.asarray(diff, dtype=float)
-    n = len(diff)
-    mean = float(np.mean(diff)) if n else np.nan
-
-    if n == 0 or margin <= 0:
-        return {
-            "tost_p_lower": np.nan,
-            "tost_p_upper": np.nan,
-            "tost_pvalue": np.nan,
-            "equivalent": False,
-            "noninferiority_p": np.nan,
-            "noninferior": False,
-        }
-
-    if n == 1:
-        lower_ok = mean > -margin
-        upper_ok = mean < margin
-        p_lower = 0.0 if lower_ok else 1.0
-        p_upper = 0.0 if upper_ok else 1.0
-        return {
-            "tost_p_lower": p_lower,
-            "tost_p_upper": p_upper,
-            "tost_pvalue": max(p_lower, p_upper),
-            "equivalent": bool(lower_ok and upper_ok),
-            "noninferiority_p": p_lower,
-            "noninferior": bool(lower_ok),
-        }
-
-    sd = float(np.std(diff, ddof=1))
-    if sd <= 1e-15:
-        lower_ok = mean > -margin
-        upper_ok = mean < margin
-        p_lower = 0.0 if lower_ok else 1.0
-        p_upper = 0.0 if upper_ok else 1.0
-        return {
-            "tost_p_lower": p_lower,
-            "tost_p_upper": p_upper,
-            "tost_pvalue": max(p_lower, p_upper),
-            "equivalent": bool(lower_ok and upper_ok),
-            "noninferiority_p": p_lower,
-            "noninferior": bool(p_lower < alpha),
-        }
-
-    se = sd / math.sqrt(n)
-    dof = n - 1
-    t_lower = (mean + margin) / se
-    p_lower = 1.0 - t.cdf(t_lower, dof)
-
-    t_upper = (mean - margin) / se
-    p_upper = t.cdf(t_upper, dof)
-
-    return {
-        "tost_p_lower": float(p_lower),
-        "tost_p_upper": float(p_upper),
-        "tost_pvalue": float(max(p_lower, p_upper)),
-        "equivalent": bool((p_lower < alpha) and (p_upper < alpha)),
-        "noninferiority_p": float(p_lower),
-        "noninferior": bool(p_lower < alpha),
-    }
-
-
-def _holm_adjust(pvalues):
-    pvalues = np.asarray(pvalues, dtype=float)
-    adjusted = np.full_like(pvalues, np.nan, dtype=float)
-    valid = np.isfinite(pvalues)
-    if not valid.any():
-        return adjusted
-
-    pv = pvalues[valid]
-    order = np.argsort(pv)
-    sorted_p = pv[order]
-    m = len(sorted_p)
-    scaled = np.array([(m - i) * p for i, p in enumerate(sorted_p)], dtype=float)
-    scaled = np.maximum.accumulate(scaled)
-    scaled = np.clip(scaled, 0.0, 1.0)
-
-    unsorted = np.empty_like(scaled)
-    unsorted[order] = scaled
-    adjusted[valid] = unsorted
-    return adjusted
 
 
 def _pairwise_qwk(df, alpha, equivalence_margin, baseline, bootstrap_iters, ci_level, rng):
@@ -403,8 +248,12 @@ def run_ordinal_sensitivity(
     if "88" in target_map:
         try:
             idx_88 = int(target_map["88"])
+            log.info("Class 88 found in target mapping (encoded index=%d). 'without_88' scenario will be computed.", idx_88)
         except Exception:
             idx_88 = None
+            log.warning("Class 88 found in target mapping but failed to parse encoded index — skipping 'without_88' scenario.")
+    else:
+        log.info("Class 88 not present in target mapping — skipping 'without_88' scenario.")
 
     rows = []
     for item in detailed:

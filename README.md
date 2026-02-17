@@ -49,12 +49,18 @@ sobre as metricas:
 |-- src/
 |   |-- config_loader.py
 |   |-- data_preparation.py
+|   |-- metrics_utils.py      # shared metrics (compute_metrics, coerce_confusion_matrix, ...)
+|   |-- stats_utils.py         # shared stats (bootstrap, wilcoxon, cohen_dz, ...)
 |   |-- run_imputation.py
 |   |-- run_classification.py
 |   |-- run_analysis.py
 |   |-- run_imputation_effect_stats.py
-|   `-- run_ordinal_sensitivity.py
-`-- main.py
+|   |-- run_ordinal_sensitivity.py
+|   `-- run_tabicl.py
+|-- tests/
+|   `-- test_shared_utils.py
+|-- main.py
+`-- pytest.ini
 ```
 
 ## Requisitos
@@ -73,11 +79,17 @@ Pacotes principais:
 ## Instalacao
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+# Recomendado: usar o ambiente conda rapids-25.10 (inclui cuML, cuDF, cuPy)
+conda activate rapids-25.10
+
+# Instalar dependencias adicionais
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+> **Nota:** Os classificadores `cuML_RF` e `cuML_SVM` requerem o RAPIDS toolkit.
+> Certifique-se de que o ambiente `rapids-25.10` (ou compativel) esta ativado
+> antes de executar o pipeline. Sem ele, apenas `XGBoost` e `CatBoost` funcionarao.
 
 Se quiser executar em CPU apenas, ajuste no `config/config.yaml`:
 
@@ -158,6 +170,21 @@ python src/run_imputation_effect_stats.py --metric f1_weighted --equivalence-mar
 # trocar baseline e numero de bootstraps
 python src/run_ordinal_sensitivity.py --baseline NoImpute --bootstrap-iters 5000
 ```
+
+Teste do TabICL (script dedicado, sem alterar pipeline principal):
+
+```bash
+# Reusa os mesmos folds de data/imputed/fold_indices.json
+python src/run_tabicl.py --input-source raw_prepared --split-source existing
+
+# Rodar com menos linhas (teste rapido)
+python src/run_tabicl.py --split-source new --max-rows 50000 --max-steps 80 --patience 10
+```
+
+Saidas:
+
+- `results/raw/tabicl_results.csv`
+- `results/raw/tabicl_results_detailed.json`
 
 ## O que cada etapa faz
 
@@ -246,14 +273,14 @@ Baseados nos artefatos atuais em `results/`.
 
 Distribuicao de classes na amostra final (`y_prepared`):
 
-| target | count |
-|---:|---:|
-| 0 | 97814 |
-| 1 | 358918 |
-| 2 | 160664 |
-| 3 | 133461 |
-| 4 | 303735 |
-| 5 | 531766 |
+| target |  count |
+| -----: | -----: |
+|      0 |  97814 |
+|      1 | 358918 |
+|      2 | 160664 |
+|      3 | 133461 |
+|      4 | 303735 |
+|      5 | 531766 |
 
 ### Cobertura experimental
 
@@ -265,23 +292,23 @@ Distribuicao de classes na amostra final (`y_prepared`):
 
 ### Top combinacoes (ordenado por `f1_weighted_mean`)
 
-| imputer | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
-|:---|:---|---:|---:|---:|---:|
-| MICE_XGBoost | XGBoost | 0.6903 | 0.7028 | 0.9380 | 426.6 |
-| MissForest | XGBoost | 0.6902 | 0.7028 | 0.9380 | 1473.8 |
-| Media | XGBoost | 0.6895 | 0.7021 | 0.9376 | 55.0 |
-| Mediana | XGBoost | 0.6895 | 0.7021 | 0.9376 | 55.1 |
-| kNN | XGBoost | 0.6893 | 0.7020 | 0.9377 | 3679.0 |
-| NoImpute | XGBoost | 0.6873 | 0.7002 | 0.9368 | 53.3 |
+| imputer      | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
+| :----------- | :--------- | ------------: | ---------------: | ----------------: | ------------------: |
+| MICE_XGBoost | XGBoost    |        0.6903 |           0.7028 |            0.9380 |               426.6 |
+| MissForest   | XGBoost    |        0.6902 |           0.7028 |            0.9380 |              1473.8 |
+| Media        | XGBoost    |        0.6895 |           0.7021 |            0.9376 |                55.0 |
+| Mediana      | XGBoost    |        0.6895 |           0.7021 |            0.9376 |                55.1 |
+| kNN          | XGBoost    |        0.6893 |           0.7020 |            0.9377 |              3679.0 |
+| NoImpute     | XGBoost    |        0.6873 |           0.7002 |            0.9368 |                53.3 |
 
 ### Media por classificador (sobre todos os imputadores)
 
 | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
-|:---|---:|---:|---:|---:|
-| XGBoost | 0.6888 | 0.7015 | 0.9374 | 845.4 |
-| CatBoost | 0.6817 | 0.6944 | 0.9343 | 119.8 |
-| cuML_RF | 0.6886 | 0.6815 | 0.9218 | 934.6 |
-| cuML_SVM | 0.5086 | 0.4841 | 0.7661 | 958.7 |
+| :--------- | ------------: | ---------------: | ----------------: | ------------------: |
+| XGBoost    |        0.6888 |           0.7015 |            0.9374 |               845.4 |
+| CatBoost   |        0.6817 |           0.6944 |            0.9343 |               119.8 |
+| cuML_RF    |        0.6886 |           0.6815 |            0.9218 |               934.6 |
+| cuML_SVM   |        0.5086 |           0.4841 |            0.7661 |               958.7 |
 
 ### Testes estatisticos
 
@@ -313,14 +340,14 @@ Resumo global:
 
 Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=5`):
 
-| imputer | delta_mean F1 vs NoImpute | IC95% bootstrap | p_wilcoxon_holm | equivalente (TOST, margem=0.005) |
-|:---|---:|:---|---:|:---:|
-| Media | +0.001903 | [-0.000923, +0.007034] | 1.0000 | Nao |
-| Mediana | +0.001898 | [-0.000927, +0.006971] | 1.0000 | Nao |
-| MICE | -0.001910 | [-0.002328, -0.001509] | 0.3750 | Sim |
-| MICE_XGBoost | +0.002648 | [-0.001440, +0.010287] | 1.0000 | Nao |
-| kNN | +0.001762 | [-0.002672, +0.009839] | 1.0000 | Nao |
-| MissForest | +0.002561 | [-0.001791, +0.010483] | 1.0000 | Nao |
+| imputer      | delta_mean F1 vs NoImpute | IC95% bootstrap        | p_wilcoxon_holm | equivalente (TOST, margem=0.005) |
+| :----------- | ------------------------: | :--------------------- | --------------: | :------------------------------: |
+| Media        |                 +0.001903 | [-0.000923, +0.007034] |          1.0000 |               Nao                |
+| Mediana      |                 +0.001898 | [-0.000927, +0.006971] |          1.0000 |               Nao                |
+| MICE         |                 -0.001910 | [-0.002328, -0.001509] |          0.3750 |               Sim                |
+| MICE_XGBoost |                 +0.002648 | [-0.001440, +0.010287] |          1.0000 |               Nao                |
+| kNN          |                 +0.001762 | [-0.002672, +0.009839] |          1.0000 |               Nao                |
+| MissForest   |                 +0.002561 | [-0.001791, +0.010483] |          1.0000 |               Nao                |
 
 Leitura direta para o objetivo do projeto:
 
@@ -340,19 +367,19 @@ Configuracao desta rodada (manifesto em `results/tables/ordinal_sensitivity/mani
 
 Melhor QWK por cenario:
 
-| scenario | melhor combinacao | qwk_mean |
-|:---|:---|---:|
-| all_classes | `MICE_XGBoost + XGBoost` | 0.7808 |
-| without_88 | `MICE_XGBoost + XGBoost` | 0.6719 |
+| scenario    | melhor combinacao        | qwk_mean |
+| :---------- | :----------------------- | -------: |
+| all_classes | `MICE_XGBoost + XGBoost` |   0.7808 |
+| without_88  | `MICE_XGBoost + XGBoost` |   0.6719 |
 
 Media por classificador (QWK), com e sem `88`:
 
 | classifier | QWK all_classes | QWK without_88 | delta (without_88 - all_classes) |
-|:---|---:|---:|---:|
-| XGBoost | 0.7787 | 0.6696 | -0.1091 |
-| CatBoost | 0.7704 | 0.6575 | -0.1129 |
-| cuML_RF | 0.7451 | 0.6659 | -0.0791 |
-| cuML_SVM | 0.4826 | 0.4370 | -0.0456 |
+| :--------- | --------------: | -------------: | -------------------------------: |
+| XGBoost    |          0.7787 |         0.6696 |                          -0.1091 |
+| CatBoost   |          0.7704 |         0.6575 |                          -0.1129 |
+| cuML_RF    |          0.7451 |         0.6659 |                          -0.0791 |
+| cuML_SVM   |          0.4826 |         0.4370 |                          -0.0456 |
 
 Inferencia ordinal:
 
@@ -366,16 +393,16 @@ Leitura direta:
 
 ### Relatorio por classe do melhor modelo (MICE_XGBoost + XGBoost)
 
-| Classe | Precision | Recall | F1-Score | Support |
-|:---|:---|:---|:---|---:|
-| 0 | 0.4816 +- 0.0080 | 0.7358 +- 0.0038 | 0.5821 +- 0.0055 | 19563 |
-| 1 | 0.7473 +- 0.0029 | 0.6063 +- 0.0040 | 0.6694 +- 0.0035 | 71784 |
-| 2 | 0.4316 +- 0.0042 | 0.5413 +- 0.0018 | 0.4803 +- 0.0032 | 32133 |
-| 3 | 0.3719 +- 0.0050 | 0.5516 +- 0.0035 | 0.4442 +- 0.0046 | 26692 |
-| 4 | 0.7213 +- 0.0055 | 0.6439 +- 0.0057 | 0.6804 +- 0.0056 | 60747 |
-| 88 | 0.9459 +- 0.0012 | 0.8450 +- 0.0084 | 0.8926 +- 0.0052 | 106353 |
-| macro avg | 0.6166 +- 0.0043 | 0.6540 +- 0.0037 | 0.6248 +- 0.0045 | 317272 |
-| weighted avg | 0.7289 +- 0.0033 | 0.6903 +- 0.0051 | 0.7028 +- 0.0046 | 317272 |
+| Classe       | Precision        | Recall           | F1-Score         | Support |
+| :----------- | :--------------- | :--------------- | :--------------- | ------: |
+| 0            | 0.4816 +- 0.0080 | 0.7358 +- 0.0038 | 0.5821 +- 0.0055 |   19563 |
+| 1            | 0.7473 +- 0.0029 | 0.6063 +- 0.0040 | 0.6694 +- 0.0035 |   71784 |
+| 2            | 0.4316 +- 0.0042 | 0.5413 +- 0.0018 | 0.4803 +- 0.0032 |   32133 |
+| 3            | 0.3719 +- 0.0050 | 0.5516 +- 0.0035 | 0.4442 +- 0.0046 |   26692 |
+| 4            | 0.7213 +- 0.0055 | 0.6439 +- 0.0057 | 0.6804 +- 0.0056 |   60747 |
+| 88           | 0.9459 +- 0.0012 | 0.8450 +- 0.0084 | 0.8926 +- 0.0052 |  106353 |
+| macro avg    | 0.6166 +- 0.0043 | 0.6540 +- 0.0037 | 0.6248 +- 0.0045 |  317272 |
+| weighted avg | 0.7289 +- 0.0033 | 0.6903 +- 0.0051 | 0.7028 +- 0.0046 |  317272 |
 
 ## Figuras (geradas automaticamente)
 

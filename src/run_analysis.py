@@ -383,31 +383,7 @@ def _plot_timing(summary, out_dir):
     _save_fig(fig, "timing_stacked", out_dir)
 
 
-def _coerce_confusion_matrix(raw_cm, expected_classes=None):
-    cm_data = raw_cm
-    if isinstance(cm_data, str):
-        try:
-            cm_data = json.loads(cm_data)
-        except Exception:
-            cm_data = literal_eval(cm_data)
-
-    cm = np.asarray(cm_data)
-    cm = np.squeeze(cm)
-
-    if cm.ndim == 1:
-        size = cm.size
-        n = int(np.sqrt(size))
-        if n * n == size:
-            cm = cm.reshape(n, n)
-        elif expected_classes and size == expected_classes * expected_classes:
-            cm = cm.reshape(expected_classes, expected_classes)
-        else:
-            return None
-
-    if cm.ndim != 2:
-        return None
-
-    return cm.astype(int)
+from src.metrics_utils import coerce_confusion_matrix as _coerce_confusion_matrix
 
 
 def _plot_confusion(detailed, summary, out_dir, target_map):
@@ -560,8 +536,9 @@ def _plot_radar(summary, out_dir):
     _save_fig(fig, "radar_best", out_dir)
 
 
-def run_analysis(config_path="config/config.yaml"):
-    cfg = load_config(config_path)
+def run_analysis(config_path="config/config.yaml", cfg=None):
+    if cfg is None:
+        cfg = load_config(config_path)
 
     res_dir = Path(cfg["paths"]["results_raw"])
     tab_dir = Path(cfg["paths"]["results_tables"])
@@ -571,11 +548,10 @@ def run_analysis(config_path="config/config.yaml"):
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(res_dir / "all_results.csv")
-    df_valid = (
-        df[~df.get("error", pd.Series(dtype=str)).notna()].copy()
-        if "error" in df.columns
-        else df.copy()
-    )
+    if "error" in df.columns:
+        df_valid = df[df["error"].isna()].copy()
+    else:
+        df_valid = df.copy()
 
     detailed = []
     detailed_path = res_dir / "all_results_detailed.json"

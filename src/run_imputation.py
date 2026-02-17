@@ -47,7 +47,12 @@ SPLIT_SIGNATURE_FILE = "split_signature.json"
 
 
 class CategoricalRounder(BaseEstimator, TransformerMixin):
-    """Round imputed categorical values to nearest valid encoded label."""
+    """Round imputed categorical values to nearest valid encoded label.
+
+    Uses nearest-valid-value mapping instead of naive clip+round,
+    so that only truly valid encoded labels are produced.
+    Example: valid = [0, 1, 5], imputed = 2.7 → mapped to 1 (not 3).
+    """
 
     def __init__(self, cat_indices, valid_values_list):
         self.cat_indices = cat_indices
@@ -57,11 +62,26 @@ class CategoricalRounder(BaseEstimator, TransformerMixin):
         self._is_fitted = True
         return self
 
+    @staticmethod
+    def _nearest_valid(values, valid):
+        """Map each value to the nearest element in *valid*."""
+        valid_sorted = np.sort(valid)
+        # np.searchsorted finds insertion point in sorted array
+        idx = np.searchsorted(valid_sorted, values, side="left")
+        idx = np.clip(idx, 0, len(valid_sorted) - 1)
+        # Compare with left and right neighbours to find true nearest
+        left = np.clip(idx - 1, 0, len(valid_sorted) - 1)
+        right = idx  # already clipped above
+        dist_left = np.abs(values - valid_sorted[left])
+        dist_right = np.abs(values - valid_sorted[right])
+        nearest_idx = np.where(dist_left <= dist_right, left, right)
+        return valid_sorted[nearest_idx]
+
     def transform(self, X):
-        X = np.asarray(X).copy()
+        X = np.asarray(X, dtype=np.float64).copy()
         for idx, valid in zip(self.cat_indices, self.valid_values_list):
             if len(valid) > 0:
-                X[:, idx] = np.clip(np.round(X[:, idx]), valid.min(), valid.max())
+                X[:, idx] = self._nearest_valid(X[:, idx], valid)
         return X
 
     def __sklearn_is_fitted__(self):
@@ -292,12 +312,7 @@ def _build_imputers(num_cols, cat_cols, valid_values, cfg):
     return imputers
 
 
-def _fmt_time(seconds):
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.1f}min"
-    return f"{seconds / 3600:.1f}h"
+from src.stats_utils import fmt_time as _fmt_time
 
 
 def _split_signature(y, fold_indices, n_folds):
@@ -318,8 +333,9 @@ def _split_signature(y, fold_indices, n_folds):
     }
 
 
-def run_imputation(config_path="config/config.yaml", filter_imputers=None):
-    cfg = load_config(config_path)
+def run_imputation(config_path: str = "config/config.yaml", filter_imputers: list = None, cfg: dict = None) -> None:
+    if cfg is None:
+        cfg = load_config(config_path)
     seed = cfg["experiment"]["random_seed"]
     n_folds = cfg["cv"]["n_outer_folds"]
 
@@ -394,7 +410,11 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
         imputers = OrderedDict((k, v) for k, v in imputers.items() if k in filter_imputers)
 
     tempos_path = res_dir / "tempos_imputacao.json"
-    tempos = json.load(open(tempos_path, "r", encoding="utf-8")) if tempos_path.exists() else {}
+    if tempos_path.exists():
+        with open(tempos_path, "r", encoding="utf-8") as f:
+            tempos = json.load(f)
+    else:
+        tempos = {}
 
     for imp_name, imputer in imputers.items():
         log.info("%s", "=" * 58)
@@ -420,12 +440,18 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
             if imp_name == NO_IMPUTER_NAME:
                 log.info("Imputer is %s - skipping imputation for fold %d", NO_IMPUTER_NAME, fold)
                 t_fit, t_tr, t_te = 0.0, 0.0, 0.0
-                # Directly save raw splits with NaNs
-                pd.DataFrame(X_tr, columns=all_cols).to_parquet(
+                # Directly save raw splits with NaNs, but cast to float32
+                # for dtype consistency with imputed outputs.
+                df_tr = pd.DataFrame(X_tr, columns=all_cols)
+                df_te = pd.DataFrame(X_te, columns=all_cols)
+                for df_tmp in (df_tr, df_te):
+                    for c in df_tmp.columns:
+                        df_tmp[c] = pd.to_numeric(df_tmp[c], errors="coerce").astype(np.float32)
+                df_tr.to_parquet(
                     out_dir / f"{imp_name}_fold{fold}_train.parquet",
                     index=False,
                 )
-                pd.DataFrame(X_te, columns=all_cols).to_parquet(
+                df_te.to_parquet(
                     out_dir / f"{imp_name}_fold{fold}_test.parquet",
                     index=False,
                 )
@@ -449,7 +475,7 @@ def run_imputation(config_path="config/config.yaml", filter_imputers=None):
                     X_te_imp = imp_clone.transform(X_te)
                     t_te = time.time() - t0
                 except Exception as e:
-                    log.error("Fold %d failed for %s: %s", fold, imp_name, e)
+                    log.error("Fold %d failed for %s: %s", fold, imp_name, e, exc_info=True)
                     tempos[imp_name][str(fold)] = {"error": str(e)}
                     continue
 
