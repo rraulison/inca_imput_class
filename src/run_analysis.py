@@ -188,7 +188,7 @@ def _per_class_table(detailed, summary, out_dir, target_map):
 
 
 def _ranking(summary, out_dir):
-    metrics = [c for c in ["accuracy_mean", "f1_weighted_mean", "auc_weighted_mean"] if c in summary.columns]
+    metrics = [c for c in ["accuracy_mean", "f1_weighted_mean", "f1_macro_mean", "auc_weighted_mean"] if c in summary.columns]
     ranking = summary[["imputer", "classifier"]].copy()
     ranking["method"] = ranking["imputer"] + " + " + ranking["classifier"].map(lambda x: CLF_LABELS.get(x, x))
 
@@ -294,8 +294,9 @@ def _annotate_heatmap(ax, data, fmt=".4f", fontsize=10, fontweight="bold"):
 def _plot_heatmaps(summary, out_dir):
     metrics = {
         "accuracy_mean": "Acuracia",
-        "f1_weighted_mean": "F1-Score",
-        "auc_weighted_mean": "AUC",
+        "f1_weighted_mean": "F1-Score (Weighted)",
+        "f1_macro_mean": "F1-Score (Macro)",
+        "auc_weighted_mean": "AUC (Weighted)",
         "recall_weighted_mean": "Revocacao",
     }
     for col, label in metrics.items():
@@ -580,6 +581,7 @@ def run_analysis(config_path="config/config.yaml", cfg=None):
 
     _ranking(summary, tab_dir)
     _stat_tests(df_valid, tab_dir, "f1_weighted")
+    _stat_tests(df_valid, tab_dir, "f1_macro")
     _stat_tests(df_valid, tab_dir, "auc_weighted")
 
     if missing_report is not None:
