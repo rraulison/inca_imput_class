@@ -166,6 +166,75 @@ def _replace_missing_with_nan(df, missing_rules):
     return replaced
 
 
+def _enforce_dictionary_domain(df, dict_path):
+    """
+    Overwrites any value that is not present in the variable's dictionary
+    with its designated 'Sem informação' code (like 9 or 4).
+    If a variable does not have a 'Sem informação' code, out-of-domain values
+    are set directly to NaN.
+    """
+    with open(dict_path, "r", encoding="utf-8") as f:
+        dictionary = json.load(f)
+
+    replaced_info = {}
+    for col, spec in dictionary.items():
+        if col not in df.columns:
+            continue
+        vals = spec.get("valores")
+        if not isinstance(vals, dict):
+            continue
+
+        valid_keys = set(str(k).strip() for k in vals.keys())
+
+        non_info_code = None
+        fallback_code = None
+        for k, label in vals.items():
+            lbl_norm = _normalize_text(label)
+            if lbl_norm == "sem informacao":
+                non_info_code = str(k).strip()
+                break
+            if _is_non_informative_label(label):
+                if fallback_code is None:
+                    fallback_code = str(k).strip()
+
+        if non_info_code is None:
+            non_info_code = fallback_code
+
+        valid_nums = []
+        for k in valid_keys:
+            try:
+                valid_nums.append(float(k))
+            except ValueError:
+                pass
+
+        series_str = df[col].astype("string").str.strip()
+        series_num = pd.to_numeric(series_str, errors="coerce")
+        
+        mask_valid_str = series_str.isin(valid_keys)
+        # Avoid treating empty strings as matching if valid_keys doesn't explicitly have it
+        mask_valid_num = series_num.isin(valid_nums) & series_str.notna() & (series_str != "")
+        
+        is_invalid = df[col].notna() & ~(mask_valid_str | mask_valid_num)
+        
+        n_invalid = is_invalid.sum()
+        if n_invalid > 0:
+            if non_info_code is not None:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    try:
+                        df.loc[is_invalid, col] = float(non_info_code)
+                    except ValueError:
+                        df.loc[is_invalid, col] = non_info_code
+                else:
+                    # Assign as string
+                    # If column implies integer (e.g., object types that might mix str and int)
+                    df.loc[is_invalid, col] = non_info_code
+            else:
+                df.loc[is_invalid, col] = np.nan
+            replaced_info[col] = int(n_invalid)
+
+    return replaced_info
+
+
 def prepare_data(df: "pd.DataFrame", config_path: str = "config/config.yaml", cfg: dict = None) -> None:
     if cfg is None:
         cfg = load_config(config_path)
@@ -219,6 +288,11 @@ def prepare_data(df: "pd.DataFrame", config_path: str = "config/config.yaml", cf
     )
     meta["n_after_date_filter"] = len(df)
 
+    out_of_domain_replaced = _enforce_dictionary_domain(df, dict_path)
+    if out_of_domain_replaced:
+        log.info("Enforced dictionary domain (set OOV to non-informative code) in %d columns", len(out_of_domain_replaced))
+    meta["out_of_domain_replaced"] = out_of_domain_replaced
+
     sem_info_replaced = _replace_missing_with_nan(df, missing_rules)
     if sem_info_replaced:
         log.info("Replaced non-informative dictionary values with NaN in %d columns", len(sem_info_replaced))
@@ -234,10 +308,38 @@ def prepare_data(df: "pd.DataFrame", config_path: str = "config/config.yaml", cf
         target_col,
         df[target_col].value_counts(dropna=False).sort_index(),
     )
+    
+    # 1. Clean the target column to group granular staging (e.g. 1A -> 1, 2B -> 2)
+    # The logic keeps the first digit if the value starts with 0-9.
+    # We must explicitly protect special codes like '88' and '99' and '00'-'09'.
+    target_str = df[target_col].astype("string").str.strip().str.upper()
+    grouped_target = target_str.copy()
+    
+    # Extract the first character for values that start with a digit (but only length > 1 if not special)
+    # We map '1A', '1B', etc. to '1', '2A' to '2', etc.
+    # Preserve double-digit codes like '88', '99', '00', '01'
+    is_multidigit_num = target_str.str.match(r"^\d{2}$", na=False)
+    has_first_digit = target_str.str.match(r"^\d.*", na=False)
+    
+    # Apply grouping: if it starts with a digit but is NOT exactly 2 digits
+    # (or if we want to be safe, length > 1 but not matching exactly two digits 88, 99)
+    mask_to_group = has_first_digit & ~is_multidigit_num
+    grouped_target.loc[mask_to_group] = target_str.loc[mask_to_group].str[0]
+    
+    # Convert '00', '01', '02', '03', '04' to '0', '1', '2', '3', '4'
+    is_zero_padded = target_str.str.match(r"^0\d$", na=False)
+    grouped_target.loc[is_zero_padded] = target_str.loc[is_zero_padded].str[1]
+    
+    # Reassign the grouped column
+    df[target_col] = grouped_target
+    
+    # 2. Convert to numeric, letting non-numeric stuff become NaN
     df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
+    
+    # 3. Filter only valid clinical staging classes
     n0 = len(df)
     df = df[df[target_col].isin(data_cfg["valid_classes"])].copy()
-    log.info("Target filter: %s -> %s", f"{n0:,}", f"{len(df):,}")
+    log.info("Target filter (after grouping granular staging): %s -> %s", f"{n0:,}", f"{len(df):,}")
     meta["n_after_target_filter"] = len(df)
 
     features = [f for f in all_features if f in df.columns]
