@@ -395,7 +395,7 @@ def _build_arg_parser():
 
 def main():
     _setup_logging()
-    args = _build_arg_parser().parse_args()
+    args, _ = _build_arg_parser().parse_known_args()
     run_ordinal_sensitivity(
         config_path=args.config,
         detailed_json=args.detailed_json,

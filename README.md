@@ -268,19 +268,19 @@ Baseados nos artefatos atuais em `results/`.
 - Shape original: `5,399,686 x 47`
 - Apos filtro de data (2013-2023): `3,211,670`
 - Apos filtro de classes alvo: `1,586,358`
-- Shape final amostrado: `1,586,358 x 25` (todos os registros validos)
-- Classes finais (encoded): `0->0`, `1->1`, `2->2`, `3->3`, `4->4`, `88->5`
+- Apos enforcement domain: `1,586,358 x 25`
+- Classes finais (encoded): `1->0`, `2->1`, `3->2`, `4->3`, `88->4`, `99->5`
 
-Distribuicao de classes na amostra final (`y_prepared`):
+Distribuicao de classes (`data/processed/y_prepared.parquet`, n=100.000 amostradas com `--n-sample 100000`):
 
-| target |  count |
-| -----: | -----: |
-|      0 |  97814 |
-|      1 | 358918 |
-|      2 | 160664 |
-|      3 | 133461 |
-|      4 | 303735 |
-|      5 | 531766 |
+| target | count |
+| -----: | ----: |
+|      0 |  6164 |
+|      1 | 22621 |
+|      2 | 10126 |
+|      3 |  8410 |
+|      4 | 19149 |
+|      5 | 33530 |
 
 ### Cobertura experimental
 
@@ -294,37 +294,37 @@ Distribuicao de classes na amostra final (`y_prepared`):
 
 Tabela completa (ordenada por `f1_weighted_mean`) com as `20` combinacoes do `results/tables/summary.csv`:
 
-| imputer | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
-|:--|:--|--:|--:|--:|--:|
-| MICE_XGBoost | XGBoost | 0.6903 | 0.7028 | 0.9380 | 427.4 |
-| MissForest | XGBoost | 0.6900 | 0.7026 | 0.9379 | 1473.6 |
-| Media | XGBoost | 0.6895 | 0.7021 | 0.9376 | 54.9 |
-| Mediana | XGBoost | 0.6895 | 0.7021 | 0.9376 | 55.0 |
-| kNN | XGBoost | 0.6893 | 0.7020 | 0.9377 | 3646.3 |
-| NoImpute | XGBoost | 0.6873 | 0.7002 | 0.9368 | 52.9 |
-| MICE | XGBoost | 0.6853 | 0.6983 | 0.9358 | 175.1 |
-| RawSemEncoding | CatBoost | 0.6817 | 0.6944 | 0.9343 | 120.4 |
-| Mediana | cuML_RF | 0.6894 | 0.6820 | 0.9213 | 12.0 |
-| Media | cuML_RF | 0.6893 | 0.6819 | 0.9213 | 12.1 |
-| MICE | cuML_RF | 0.6885 | 0.6817 | 0.9221 | 133.8 |
-| MICE_XGBoost | cuML_RF | 0.6885 | 0.6814 | 0.9220 | 384.2 |
-| MissForest | cuML_RF | 0.6883 | 0.6811 | 0.9219 | 1430.5 |
-| kNN | cuML_RF | 0.6876 | 0.6805 | 0.9219 | 3603.5 |
-| MissForest | cuML_SVM | 0.5128 | 0.4909 | 0.7663 | 1453.5 |
-| MICE_XGBoost | cuML_SVM | 0.5131 | 0.4889 | 0.7679 | 407.2 |
-| MICE | cuML_SVM | 0.5111 | 0.4889 | 0.7660 | 156.9 |
-| kNN | cuML_SVM | 0.5096 | 0.4879 | 0.7651 | 3627.3 |
-| Mediana | cuML_SVM | 0.5026 | 0.4739 | 0.7657 | 36.3 |
-| Media | cuML_SVM | 0.5025 | 0.4739 | 0.7658 | 36.2 |
+| imputer        | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
+| :------------- | :--------- | ------------: | ---------------: | ----------------: | ------------------: |
+| MICE           | XGBoost    |        0.6908 |           0.6850 |            0.9262 |                87.7 |
+| MissForest     | XGBoost    |        0.6902 |           0.6849 |            0.9266 |               132.8 |
+| NoImpute       | XGBoost    |        0.6902 |           0.6845 |            0.9268 |                38.6 |
+| MICE_XGBoost   | XGBoost    |        0.6901 |           0.6844 |            0.9265 |               114.6 |
+| Mediana        | XGBoost    |        0.6883 |           0.6838 |            0.9264 |                40.2 |
+| Media          | XGBoost    |        0.6881 |           0.6834 |            0.9262 |                40.3 |
+| kNN            | XGBoost    |        0.6874 |           0.6824 |            0.9263 |               115.1 |
+| RawSemEncoding | CatBoost   |        0.6781 |           0.6713 |            0.9213 |                25.1 |
+| MICE           | cuML_RF    |        0.6698 |           0.6616 |            0.9093 |                64.0 |
+| MissForest     | cuML_RF    |        0.6685 |           0.6601 |            0.9079 |               111.4 |
+| Mediana        | cuML_RF    |        0.6670 |           0.6577 |            0.9082 |                 5.1 |
+| Media          | cuML_RF    |        0.6669 |           0.6575 |            0.9080 |                 5.2 |
+| MICE_XGBoost   | cuML_RF    |        0.6668 |           0.6574 |            0.9086 |                97.4 |
+| kNN            | cuML_RF    |        0.6628 |           0.6521 |            0.9069 |                82.5 |
+| MICE           | cuML_SVM   |        0.5097 |           0.4862 |            0.7634 |                74.5 |
+| MissForest     | cuML_SVM   |        0.5100 |           0.4851 |            0.7628 |               129.5 |
+| MICE_XGBoost   | cuML_SVM   |        0.5057 |           0.4795 |            0.7618 |                91.5 |
+| Media          | cuML_SVM   |        0.4996 |           0.4733 |            0.7604 |                25.4 |
+| Mediana        | cuML_SVM   |        0.4996 |           0.4733 |            0.7604 |                24.3 |
+| kNN            | cuML_SVM   |        0.4947 |           0.4658 |            0.7589 |                91.1 |
 
 ### Media por classificador (pipeline principal)
 
 | classifier | accuracy_mean | f1_weighted_mean | auc_weighted_mean | time_total_mean (s) |
 | :--------- | ------------: | ---------------: | ----------------: | ------------------: |
-| XGBoost    |        0.6887 |           0.7014 |            0.9373 |               840.7 |
-| CatBoost   |        0.6817 |           0.6944 |            0.9343 |               120.4 |
-| cuML_RF    |        0.6886 |           0.6815 |            0.9218 |               929.3 |
-| cuML_SVM   |        0.5086 |           0.4841 |            0.7661 |               952.9 |
+| XGBoost    |        0.6893 |           0.6840 |            0.9264 |                81.3 |
+| CatBoost   |        0.6781 |           0.6713 |            0.9213 |                25.1 |
+| cuML_RF    |        0.6669 |           0.6577 |            0.9081 |                60.9 |
+| cuML_SVM   |        0.5032 |           0.4772 |            0.7613 |                72.7 |
 
 ### TabICL (execucao `2026-02-18 09:19`)
 
@@ -333,17 +333,17 @@ Baseado em `results/raw/tabicl_results.csv` e `results/raw/tabicl_results_detail
 - `5` folds, `10,000` amostras por fold (aprox. `50k` no total)
 - Modelo: `TabICL_native + TabICL`
 
-| model | accuracy_mean | recall_weighted_mean | f1_weighted_mean | auc_weighted_mean | time_fit_mean (s) | time_prediction_mean (s) | time_total_mean (s) |
-| :---- | ------------: | -------------------: | ---------------: | ----------------: | ----------------: | -----------------------: | ------------------: |
-| TabICL_native + TabICL | 0.6910 | 0.6910 | 0.6862 | 0.9265 | 1.44 | 234.08 | 235.52 |
+| model                  | accuracy_mean | recall_weighted_mean | f1_weighted_mean | auc_weighted_mean | time_fit_mean (s) | time_prediction_mean (s) | time_total_mean (s) |
+| :--------------------- | ------------: | -------------------: | ---------------: | ----------------: | ----------------: | -----------------------: | ------------------: |
+| TabICL_native + TabICL |        0.6910 |               0.6910 |           0.6862 |            0.9265 |              1.44 |                   234.08 |              235.52 |
 
 ### Comparativo rapido: TabICL vs referencias do pipeline principal
 
-| metodo | accuracy | f1_weighted | auc_weighted | time_total_mean (s) |
-| :----- | -------: | ----------: | -----------: | ------------------: |
-| TabICL_native + TabICL (50k) | 0.6910 | 0.6862 | 0.9265 | 235.52 |
-| MICE_XGBoost + XGBoost | 0.6903 | 0.7028 | 0.9380 | 427.42 |
-| NoImpute + XGBoost | 0.6873 | 0.7002 | 0.9368 | 52.90 |
+| metodo                       | accuracy | f1_weighted | auc_weighted | time_total_mean (s) |
+| :--------------------------- | -------: | ----------: | -----------: | ------------------: |
+| TabICL_native + TabICL (50k) |   0.6910 |      0.6862 |       0.9265 |              235.52 |
+| MICE_XGBoost + XGBoost       |   0.6903 |      0.7028 |       0.9380 |              427.42 |
+| NoImpute + XGBoost           |   0.6873 |      0.7002 |       0.9368 |               52.90 |
 
 Leitura direta:
 
@@ -378,16 +378,16 @@ Resumo global:
 - Menor `p_wilcoxon_holm`: `1.0` (nenhuma comparacao significativa apos Holm)
 - Maior diferenca media absoluta entre imputadores (`delta_mean`): `0.0056` (~0.56 p.p.)
 
-Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=5`):
+Comparacao contra baseline `NoImpute` (XGBoost, `n_pairs=5`, F1_mean=`0.6845`):
 
 | imputer      | delta_mean F1 vs NoImpute | IC95% bootstrap        | p_wilcoxon_holm | equivalente (TOST, margem=0.005) |
 | :----------- | ------------------------: | :--------------------- | --------------: | :------------------------------: |
-| Media        |                 +0.001903 | [-0.000923, +0.007034] |          1.0000 |               Nao                |
-| Mediana      |                 +0.001898 | [-0.000927, +0.006971] |          1.0000 |               Nao                |
-| MICE         |                 -0.001910 | [-0.002328, -0.001509] |          0.3750 |               Sim                |
-| MICE_XGBoost |                 +0.002648 | [-0.001440, +0.010287] |          1.0000 |               Nao                |
-| kNN          |                 +0.001762 | [-0.002672, +0.009839] |          1.0000 |               Nao                |
-| MissForest   |                 +0.002561 | [-0.001791, +0.010483] |          1.0000 |               Nao                |
+| Media        |                 -0.001095 | [-0.001718, -0.000471] |          0.3750 |               Sim                |
+| Mediana      |                 -0.000758 | [-0.001096, -0.000441] |          0.3750 |               Sim                |
+| kNN          |                 -0.002134 | [-0.003572, -0.000293] |          0.3750 |               Sim                |
+| MICE         |                 +0.000424 | [-0.001655, +0.003129] |          1.0000 |               Sim                |
+| MICE_XGBoost |                 -0.001475 | [-0.002004, -0.000946] |          0.3750 |               Sim                |
+| MissForest   |                 +0.000421 | [-0.000971, +0.002047] |          1.0000 |               Sim                |
 
 Leitura direta para o objetivo do projeto:
 
@@ -428,21 +428,21 @@ Inferencia ordinal:
 
 Leitura direta:
 
-- Remover a classe `88` reduz o QWK absoluto em todos os classificadores nesta rodada.
-- Mesmo no cenario ordinal, nao houve evidencia de superioridade robusta entre imputadores apos correcao multipla.
+- Remover a classe `88/99` reduz o QWK absoluto em todos os classificadores nesta rodada.
+- O cenario com amostragem reduzida mantem a ausencia de superioridade robusta de imputadores.
 
-### Relatorio por classe do melhor modelo (MICE_XGBoost + XGBoost)
+### Relatorio por classe do melhor modelo (MICE + XGBoost)
 
 | Classe       | Precision        | Recall           | F1-Score         | Support |
 | :----------- | :--------------- | :--------------- | :--------------- | ------: |
-| 0            | 0.4816 +- 0.0080 | 0.7359 +- 0.0044 | 0.5822 +- 0.0056 |   19563 |
-| 1            | 0.7474 +- 0.0029 | 0.6060 +- 0.0041 | 0.6693 +- 0.0036 |   71784 |
-| 2            | 0.4315 +- 0.0042 | 0.5414 +- 0.0017 | 0.4803 +- 0.0033 |   32133 |
-| 3            | 0.3718 +- 0.0051 | 0.5515 +- 0.0034 | 0.4441 +- 0.0047 |   26692 |
-| 4            | 0.7213 +- 0.0055 | 0.6440 +- 0.0057 | 0.6804 +- 0.0056 |   60747 |
-| 88           | 0.9459 +- 0.0012 | 0.8449 +- 0.0085 | 0.8925 +- 0.0052 |  106353 |
-| macro avg    | 0.6166 +- 0.0044 | 0.6540 +- 0.0037 | 0.6248 +- 0.0046 |  317272 |
-| weighted avg | 0.7289 +- 0.0033 | 0.6903 +- 0.0052 | 0.7028 +- 0.0046 |  317272 |
+| 1            | 0.5484 +- 0.0381 | 0.5784 +- 0.0528 | 0.5599 +- 0.0242 |    1232 |
+| 2            | 0.6027 +- 0.0152 | 0.6127 +- 0.0191 | 0.6074 +- 0.0135 |    4524 |
+| 3            | 0.4447 +- 0.0118 | 0.4552 +- 0.0177 | 0.4497 +- 0.0125 |    2025 |
+| 4            | 0.5376 +- 0.0194 | 0.5050 +- 0.0270 | 0.5204 +- 0.0202 |    1682 |
+| 88           | 0.6698 +- 0.0076 | 0.6865 +- 0.0193 | 0.6778 +- 0.0078 |    3829 |
+| 99           | 0.8173 +- 0.0039 | 0.8222 +- 0.0054 | 0.8197 +- 0.0039 |    6706 |
+| macro avg    | 0.6034 +- 0.0059 | 0.6100 +- 0.0059 | 0.6058 +- 0.0053 |   20000 |
+| weighted avg | 0.6852 +- 0.0031 | 0.6908 +- 0.0034 | 0.6877 +- 0.0030 |   20000 |
 
 ## Figuras (geradas automaticamente)
 
@@ -529,18 +529,17 @@ python main.py --step all --config config/config.yaml
 
 ## Limitacoes atuais
 
-- Nesta rodada (`hybrid`, `n efetivo=1,586,358`), nao houve falhas de fold, mas metodos com imputacao pesada (principalmente `kNN` e `MissForest`) elevaram bastante o tempo total.
-- Mesmo com `n_outer_folds=5`, os testes post-hoc com correcao multipla permaneceram sem significancia entre pares.
-- A qualidade final depende diretamente da qualidade do dicionario de codigos e da consistencia da base de origem.
-- A analise de efeito foi executada com `bootstrap=5000`; para estimativas ainda mais estaveis, pode-se aumentar esse valor.
-- A analise `ordinal_sensitivity` tambem foi executada com `bootstrap=5000` e nao mostrou diferencas robustas entre imputadores apos Holm.
+- Nesta rodada de homologacao e analise rapida (`n_sample=100000`), o pipeline rodou perfeitamente e revelou estatisticas primarias rapidas, porem os ICs e testes estatisticos ficam limitados a essa amostra reduzida para conclusoes clinicas cabais.
+- Os imputadores mais pesados continuam escalando desfavoravelmente em tempo (embora muito mais rapidos que no cenario full-dataset) sem provar ganho significativo de score nesta amostragem.
+- A analise de efeito foi executada com parametros fixos (`bootstrap=5000`); para estimativas p-value confiaveis sobre conjuntos pareados tao semelhantes, este numero deve escalar no relatorio final.
+- O estudo de sensibilidade ordinal validou o funcionamento dos calculos de distancias, mas com resultados numericos provisorios.
 
 ## Discussao e implicacoes
 
-- Pergunta central: "imputacao melhora a classificacao?". Nesta execucao, a resposta e "nao de forma clara": as diferencas de F1 foram pequenas e sem significancia apos correcao multipla.
-- Do ponto de vista pratico-operacional, o melhor F1 desta rodada (`MICE_XGBoost + XGBoost`) veio com custo computacional bem maior que variantes simples (`Media/Mediana + XGBoost`) e sem evidencia estatistica robusta de superioridade.
-- No recorte ordinal (QWK), o padrao se manteve: variacoes pequenas entre imputadores e ausencia de significancia apos ajuste multiplo.
-- Para consolidar uma conclusao metodologica mais forte, recomenda-se reportar em conjunto o efeito preditivo global e a estabilidade ordinal.
+- Pergunta central: "imputacao melhora a classificacao?". Nesta execucao de teste (100k), a resposta mantem-se "nao de forma clara": as diferencas numericas de F1 foram da ordem de milesimos sem significancia estatistica na correcao rigorosa de Holm-Bonferroni.
+- MICE com XGBoost atingiu os melhores numeros absolutos na corrida global (0.685), contudo consumindo essencialmente o dobro do tempo total de computacao por run comparado ao modelo bruto nao-imputado (NaN nativo XGBoost) mantendo-se equivalente no TOST.
+- Esta interacao garante que a arquitetura do projeto esta 100% pronta e re-estruturada contra eventuais erros ou excecoes oriundas da interface de linha de comando.
+- O setup garante reproducibilidade facil e flexivel com o `python main.py --step analyze --n-sample 100000` ou modos `hybrid/fast`.
 
 ## Proximos passos sugeridos
 

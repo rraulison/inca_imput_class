@@ -337,7 +337,7 @@ def _build_arg_parser():
 
 def main():
     _setup_logging()
-    args = _build_arg_parser().parse_args()
+    args, _ = _build_arg_parser().parse_known_args()
     run_imputation_effect_stats(
         config_path=args.config,
         input_csv=args.input_csv,

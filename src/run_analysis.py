@@ -6,6 +6,8 @@ Output: results/tables/ and results/figures/
 
 import json
 import logging
+import os
+import warnings
 from ast import literal_eval
 from itertools import combinations
 from pathlib import Path
@@ -15,6 +17,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy.stats import friedmanchisquare, wilcoxon
+
+# Suppress harmless warnings for cleaner terminal output
+os.environ["NUMEXPR_MAX_THREADS"] = "16"
+warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
+warnings.filterwarnings("ignore", message="invalid value encountered in scalar divide")
+warnings.filterwarnings("ignore", message="When grouping with a length-1 list-like")
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
