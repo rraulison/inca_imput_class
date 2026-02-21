@@ -4,12 +4,13 @@ Projeto para comparar metodos de imputacao de dados faltantes e classificadores 
 
 ## Visao geral
 
-Este repositorio implementa um pipeline completo em 4 etapas:
+Este repositorio implementa um pipeline completo em 5 etapas:
 
-1. `prepare`: limpeza, filtro temporal, tratamento de codigos "sem informacao", encoding e amostragem estratificada.
+1. `prepare`: limpeza, filtro temporal, tratamento de codigos "sem informacao" e amostragem estratificada.
 2. `impute`: imputacao fold-a-fold (treino/teste) sem vazamento de dados.
 3. `classify`: classificacao com validacao cruzada aninhada e tuning de hiperparametros.
 4. `analyze`: consolidacao de metricas, testes estatisticos, tabelas e figuras.
+5. `temporal`: validacao externa temporal (treino em anos antigos, teste em anos recentes).
 
 Analises complementares (pos-pipeline) tambem estao disponiveis:
 
@@ -54,6 +55,7 @@ sobre as metricas:
 |   |-- run_imputation.py
 |   |-- run_classification.py
 |   |-- run_analysis.py
+|   |-- run_temporal_sensitivity.py
 |   |-- run_imputation_effect_stats.py
 |   |-- run_ordinal_sensitivity.py
 |   `-- run_tabicl.py
@@ -109,6 +111,9 @@ Parametros mais importantes:
 - `data.missing_threshold: 0.60`
 - `cv.n_outer_folds: 5`
 - `cv.n_inner_folds: 5`
+- `temporal_validation.train_end_year: 2020`
+- `temporal_validation.test_start_year: 2021`
+- `temporal_validation.test_end_year: 2023`
 - `classification.tuning.scoring: f1_weighted`
 
 ## Como executar
@@ -128,6 +133,7 @@ python main.py --step prepare
 python main.py --step impute
 python main.py --step classify
 python main.py --step analyze
+python main.py --step temporal
 ```
 
 Executar subconjuntos:
@@ -159,6 +165,9 @@ python src/run_imputation_effect_stats.py --metric f1_weighted
 
 # sensibilidade ordinal com/sem classe 88
 python src/run_ordinal_sensitivity.py
+
+# validacao temporal externa (train<=2020, test=2021-2023)
+python src/run_temporal_sensitivity.py
 ```
 
 Parametros uteis:
@@ -195,10 +204,11 @@ Saidas:
 - Filtra classes validas do alvo
 - Remove variaveis de leakage/administrativas
 - Reduz cardinalidade de variaveis de alta cardinalidade
-- Aplica `LabelEncoder` nas categoricas
+- Mantem categoricas sem encoding global (encoding train-only ocorre no passo `impute`)
 - Faz amostragem estratificada (`n_sample`)
 - Salva:
   - `data/processed/X_prepared.parquet`
+  - `data/processed/temporal_reference.parquet`
   - `data/processed/y_prepared.parquet`
   - `data/processed/encoders.pkl`
   - `results/tables/metadata.json`
@@ -206,6 +216,7 @@ Saidas:
 ### 2) `impute` (`src/run_imputation.py`)
 
 - Cria folds estratificados externos
+- Ajusta encoding categórico apenas no treino de cada fold (categorias nao vistas no teste viram `NaN`)
 - Ajusta imputador apenas no treino de cada fold
 - Transforma treino e teste separadamente
 - Arredonda variaveis categoricas imputadas para valores validos
@@ -235,7 +246,17 @@ Saidas:
 - Produz tabelas `.csv` e `.tex`
 - Gera figuras em PNG/PDF
 
-### 5) `imputation_effect_stats` (`src/run_imputation_effect_stats.py`)
+### 5) `temporal` (`src/run_temporal_sensitivity.py`)
+
+- Le artefatos preparados (`X_prepared`, `y_prepared`, `temporal_reference`)
+- Define split temporal externo (padrao: treino `<=2020`, teste `2021-2023`)
+- Reaplica imputacao + classificacao no split temporal
+- Salva:
+  - `results/raw/temporal_sensitivity_results.csv`
+  - `results/raw/temporal_sensitivity_results_detailed.json`
+  - `results/tables/temporal_sensitivity/summary_temporal.csv`
+
+### 6) `imputation_effect_stats` (`src/run_imputation_effect_stats.py`)
 
 - Le `results/raw/all_results.csv` (nivel fold)
 - Compara imputadores de forma pareada nos mesmos blocos (`classifier`, `fold`)
@@ -246,7 +267,7 @@ Saidas:
   - testes de equivalencia (TOST) e nao-inferioridade
 - Salva em `results/tables/imputation_effect/`
 
-### 6) `ordinal_sensitivity` (`src/run_ordinal_sensitivity.py`)
+### 7) `ordinal_sensitivity` (`src/run_ordinal_sensitivity.py`)
 
 - Le `results/raw/all_results_detailed.json` e `results/tables/metadata.json`
 - Calcula metricas ordinais por fold a partir da matriz de confusao:

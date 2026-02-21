@@ -10,7 +10,6 @@ import gc
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -28,6 +27,7 @@ from sklearn.pipeline import Pipeline
 from tqdm import tqdm
 from xgboost import XGBRegressor
 
+from src.categorical_encoding import encode_with_category_maps, fit_train_category_maps
 from src.config_loader import load_config
 
 try:
@@ -43,7 +43,9 @@ except Exception:  # pragma: no cover - optional dependency
 log = logging.getLogger(__name__)
 
 NO_IMPUTER_NAME = "NoImpute"
+BASE_IMPUTER_NAMES = ["Media", "Mediana", "kNN", "MICE_XGBoost", "MICE", "MissForest"]
 SPLIT_SIGNATURE_FILE = "split_signature.json"
+ENCODING_STATS_FILE = "fold_encoding_stats.json"
 
 
 class CategoricalRounder(BaseEstimator, TransformerMixin):
@@ -312,9 +314,6 @@ def _build_imputers(num_cols, cat_cols, valid_values, cfg):
     return imputers
 
 
-from src.stats_utils import fmt_time as _fmt_time
-
-
 def _split_signature(y, fold_indices, n_folds):
     y_arr = np.asarray(y, dtype=np.int32)
     y_hash = hashlib.sha1(y_arr.tobytes()).hexdigest()
@@ -349,9 +348,6 @@ def run_imputation(config_path: str = "config/config.yaml", filter_imputers: lis
     proc_dir = Path(cfg["paths"]["processed_data"])
     X = pd.read_parquet(proc_dir / "X_prepared.parquet")
     y = pd.read_parquet(proc_dir / "y_prepared.parquet")["target"]
-
-    with open(proc_dir / "encoders.pkl", "rb") as f:
-        enc = pickle.load(f)
 
     with open(Path(cfg["paths"]["results_tables"]) / "metadata.json", "r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -390,24 +386,25 @@ def run_imputation(config_path: str = "config/config.yaml", filter_imputers: lis
     with open(sig_path, "w", encoding="utf-8") as f:
         json.dump(current_sig, f, indent=2)
 
-    base_imputers = _build_imputers(num_cols, cat_cols, enc["valid_values"], cfg)
-    cfg_imputers = cfg.get("imputation", {}).get("imputers") or list(base_imputers.keys()) + [NO_IMPUTER_NAME]
+    cfg_imputers = cfg.get("imputation", {}).get("imputers") or (BASE_IMPUTER_NAMES + [NO_IMPUTER_NAME])
 
-    imputers = OrderedDict()
+    imputer_names = []
     seen = set()
     for name in cfg_imputers:
         if name in seen:
             continue
         seen.add(name)
-        if name in base_imputers:
-            imputers[name] = base_imputers[name]
-        elif name == NO_IMPUTER_NAME:
-            imputers[name] = None  # No-imputation baseline for native NaN handling models.
+        if name in BASE_IMPUTER_NAMES or name == NO_IMPUTER_NAME:
+            imputer_names.append(name)
         else:
             log.warning("Configured imputer '%s' is not available and will be skipped.", name)
 
     if filter_imputers:
-        imputers = OrderedDict((k, v) for k, v in imputers.items() if k in filter_imputers)
+        allowed = set(filter_imputers)
+        imputer_names = [name for name in imputer_names if name in allowed]
+
+    if not imputer_names:
+        raise ValueError("No valid imputers selected.")
 
     tempos_path = res_dir / "tempos_imputacao.json"
     if tempos_path.exists():
@@ -416,95 +413,118 @@ def run_imputation(config_path: str = "config/config.yaml", filter_imputers: lis
     else:
         tempos = {}
 
-    for imp_name, imputer in imputers.items():
-        log.info("%s", "=" * 58)
-        log.info("Imputer: %s", imp_name)
-        if force_recompute:
-            tempos[imp_name] = {}
-        elif imp_name not in tempos:
-            tempos[imp_name] = {}
+    if force_recompute:
+        tempos = {name: {} for name in imputer_names}
+    else:
+        for name in imputer_names:
+            tempos.setdefault(name, {})
 
-        for fold in tqdm(range(n_folds), desc=imp_name):
+    encoding_stats_path = out_dir / ENCODING_STATS_FILE
+    if encoding_stats_path.exists() and not force_recompute:
+        with open(encoding_stats_path, "r", encoding="utf-8") as f:
+            encoding_stats = json.load(f)
+    else:
+        encoding_stats = {}
+
+    for fold in tqdm(range(n_folds), desc="Folds"):
+        tr_idx = fold_indices[fold]["train"]
+        te_idx = fold_indices[fold]["test"]
+
+        X_tr_raw = X.iloc[tr_idx].copy()
+        X_te_raw = X.iloc[te_idx].copy()
+
+        cat_maps, valid_values_fold = fit_train_category_maps(X_tr_raw, cat_cols)
+        X_tr_encoded, unseen_train = encode_with_category_maps(X_tr_raw, num_cols, cat_cols, cat_maps)
+        X_te_encoded, unseen_test = encode_with_category_maps(X_te_raw, num_cols, cat_cols, cat_maps)
+
+        unseen_total = int(sum(unseen_test.values()))
+        if unseen_total > 0:
+            log.warning("Fold %d has %d unseen categorical values in test split (mapped to NaN).", fold, unseen_total)
+
+        encoding_stats[str(fold)] = {
+            "n_train": int(len(tr_idx)),
+            "n_test": int(len(te_idx)),
+            "n_categories_train": {col: int(len(valid_values_fold.get(col, []))) for col in cat_cols},
+            "n_unseen_train": {col: int(unseen_train.get(col, 0)) for col in cat_cols},
+            "n_unseen_test": {col: int(unseen_test.get(col, 0)) for col in cat_cols},
+        }
+
+        fold_imputers = _build_imputers(num_cols, cat_cols, valid_values_fold, cfg)
+
+        for imp_name in imputer_names:
             ckpt = out_dir / f"{imp_name}_fold{fold}_train.parquet"
             if ckpt.exists() and not force_recompute:
-                log.info("Fold %d already done, skipping", fold)
                 continue
 
-            tr_idx = fold_indices[fold]["train"]
-            te_idx = fold_indices[fold]["test"]
-
-            X_tr = X.iloc[tr_idx].copy()
-            X_te = X.iloc[te_idx].copy()
-            log.info("Fold %d start | train=%d test=%d", fold, len(tr_idx), len(te_idx))
+            log.info("Fold %d start | imputer=%s | train=%d test=%d", fold, imp_name, len(tr_idx), len(te_idx))
 
             if imp_name == NO_IMPUTER_NAME:
-                log.info("Imputer is %s - skipping imputation for fold %d", NO_IMPUTER_NAME, fold)
                 t_fit, t_tr, t_te = 0.0, 0.0, 0.0
-                # Directly save raw splits with NaNs, but cast to float32
-                # for dtype consistency with imputed outputs.
-                df_tr = pd.DataFrame(X_tr, columns=all_cols)
-                df_te = pd.DataFrame(X_te, columns=all_cols)
+                df_tr = X_tr_encoded.copy()
+                df_te = X_te_encoded.copy()
                 for df_tmp in (df_tr, df_te):
                     for c in df_tmp.columns:
                         df_tmp[c] = pd.to_numeric(df_tmp[c], errors="coerce").astype(np.float32)
-                df_tr.to_parquet(
-                    out_dir / f"{imp_name}_fold{fold}_train.parquet",
-                    index=False,
-                )
-                df_te.to_parquet(
-                    out_dir / f"{imp_name}_fold{fold}_test.parquet",
-                    index=False,
-                )
+
+                df_tr.to_parquet(out_dir / f"{imp_name}_fold{fold}_train.parquet", index=False)
+                df_te.to_parquet(out_dir / f"{imp_name}_fold{fold}_test.parquet", index=False)
                 tempos[imp_name][str(fold)] = {
                     "time_fit": float(t_fit),
                     "time_transform_train": float(t_tr),
                     "time_transform_test": float(t_te),
                 }
-            else:
-                try:
-                    t0 = time.time()
-                    imp_clone = clone(imputer)
-                    imp_clone.fit(X_tr)
-                    t_fit = time.time() - t0
+                continue
 
-                    t0 = time.time()
-                    X_tr_imp = imp_clone.transform(X_tr)
-                    t_tr = time.time() - t0
+            if imp_name not in fold_imputers:
+                log.error("Imputer '%s' is not available in this run and will be skipped.", imp_name)
+                tempos[imp_name][str(fold)] = {"error": f"imputer_not_available:{imp_name}"}
+                continue
 
-                    t0 = time.time()
-                    X_te_imp = imp_clone.transform(X_te)
-                    t_te = time.time() - t0
-                except Exception as e:
-                    log.error("Fold %d failed for %s: %s", fold, imp_name, e, exc_info=True)
-                    tempos[imp_name][str(fold)] = {"error": str(e)}
-                    continue
+            try:
+                t0 = time.time()
+                imp_clone = clone(fold_imputers[imp_name])
+                imp_clone.fit(X_tr_encoded)
+                t_fit = time.time() - t0
 
-                for arr, split_name in ((X_tr_imp, "train"), (X_te_imp, "test")):
-                    n_nan = int(np.isnan(arr).sum())
-                    if n_nan > 0:
-                        log.warning("%s fold %d has %d residual NaN, filling with 0", split_name, fold, n_nan)
+                t0 = time.time()
+                X_tr_imp = imp_clone.transform(X_tr_encoded)
+                t_tr = time.time() - t0
 
-                X_tr_imp = np.nan_to_num(X_tr_imp, nan=0.0)
-                X_te_imp = np.nan_to_num(X_te_imp, nan=0.0)
+                t0 = time.time()
+                X_te_imp = imp_clone.transform(X_te_encoded)
+                t_te = time.time() - t0
+            except Exception as e:
+                log.error("Fold %d failed for %s: %s", fold, imp_name, e, exc_info=True)
+                tempos[imp_name][str(fold)] = {"error": str(e)}
+                continue
 
-                pd.DataFrame(X_tr_imp, columns=all_cols).to_parquet(
-                    out_dir / f"{imp_name}_fold{fold}_train.parquet",
-                    index=False,
-                )
-                pd.DataFrame(X_te_imp, columns=all_cols).to_parquet(
-                    out_dir / f"{imp_name}_fold{fold}_test.parquet",
-                    index=False,
-                )
-                tempos[imp_name][str(fold)] = {
-                    "time_fit": float(t_fit),
-                    "time_transform_train": float(t_tr),
-                    "time_transform_test": float(t_te),
-                }
-                del imp_clone, X_tr_imp, X_te_imp
-                gc.collect()
+            for arr, split_name in ((X_tr_imp, "train"), (X_te_imp, "test")):
+                n_nan = int(np.isnan(arr).sum())
+                if n_nan > 0:
+                    log.warning("%s fold %d has %d residual NaN, filling with 0", split_name, fold, n_nan)
+
+            X_tr_imp = np.nan_to_num(X_tr_imp, nan=0.0)
+            X_te_imp = np.nan_to_num(X_te_imp, nan=0.0)
+
+            pd.DataFrame(X_tr_imp, columns=all_cols).to_parquet(out_dir / f"{imp_name}_fold{fold}_train.parquet", index=False)
+            pd.DataFrame(X_te_imp, columns=all_cols).to_parquet(out_dir / f"{imp_name}_fold{fold}_test.parquet", index=False)
+            tempos[imp_name][str(fold)] = {
+                "time_fit": float(t_fit),
+                "time_transform_train": float(t_tr),
+                "time_transform_test": float(t_te),
+            }
+
+            del imp_clone, X_tr_imp, X_te_imp
+            gc.collect()
 
         with open(tempos_path, "w", encoding="utf-8") as f:
             json.dump(tempos, f, indent=2)
+
+        with open(encoding_stats_path, "w", encoding="utf-8") as f:
+            json.dump(encoding_stats, f, indent=2)
+
+        del X_tr_raw, X_te_raw, X_tr_encoded, X_te_encoded, fold_imputers
+        gc.collect()
 
     log.info("Imputation finished.")
     return tempos

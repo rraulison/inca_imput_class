@@ -74,6 +74,11 @@ cv:
   n_outer_folds: 5
   n_inner_folds: 5
 
+temporal_validation:
+  train_end_year: 2020
+  test_start_year: 2021
+  test_end_year: 2023
+
 imputation:
   imputers: [Media, Mediana, kNN, MICE, MICE_XGBoost, MissForest, NoImpute]
   params:

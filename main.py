@@ -9,6 +9,7 @@ Usage:
     python main.py --step impute
     python main.py --step classify
     python main.py --step analyze
+    python main.py --step temporal
     python main.py --runtime-mode hybrid --n-sample 100000
     python main.py --runtime-mode fast --n-sample 100000
     python main.py --step classify --classifier XGBoost
@@ -130,7 +131,7 @@ def apply_runtime_overrides(cfg, args, log):
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Imputation x Classification")
-    parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, all")
+    parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, temporal, all")
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--data", default=None, help="Raw CSV path")
     parser.add_argument("--imputer", default=None, help="Filter to one imputer")
@@ -222,6 +223,20 @@ def main():
         from src.run_analysis import run_analysis
 
         run_analysis(args.config, cfg=cfg)
+
+    if run_all or "temporal" in steps:
+        log.info("STEP 5 - TEMPORAL SENSITIVITY")
+        from src.run_temporal_sensitivity import run_temporal_sensitivity
+
+        filter_imputers = [args.imputer] if args.imputer else None
+        filter_classifiers = [args.classifier] if args.classifier else None
+        run_temporal_sensitivity(
+            config_path=args.config,
+            cfg=cfg,
+            filter_imputers=filter_imputers,
+            filter_classifiers=filter_classifiers,
+            runtime_mode=args.runtime_mode,
+        )
 
     log.info("Completed at: %s", datetime.now().isoformat())
 
