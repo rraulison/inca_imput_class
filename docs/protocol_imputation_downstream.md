@@ -77,7 +77,7 @@ Dry-run recomendado antes do experimento completo:
 
 ```bash
 python main.py --step protocol --protocol-mode confirmatory --dry-run \
-    --n-sample 5000 --repeats 1 --imputer Media,NoImpute --classifier XGBoost
+    --n-sample 5000 --repeats 1 --protocol-imputer Media,NoImpute --protocol-classifier XGBoost
 ```
 
 ### Fase A - Pre-registro e congelamento

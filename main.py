@@ -10,6 +10,8 @@ Usage:
     python main.py --step classify
     python main.py --step analyze
     python main.py --step temporal
+    python main.py --step protocol
+    python main.py --step protocol --dry-run --protocol-imputer Media,NoImpute --protocol-classifier XGBoost
     python main.py --runtime-mode hybrid --n-sample 100000
     python main.py --runtime-mode fast --n-sample 100000
     python main.py --step classify --classifier XGBoost
@@ -131,7 +133,7 @@ def apply_runtime_overrides(cfg, args, log):
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Imputation x Classification")
-    parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, temporal, all")
+    parser.add_argument("--step", default="all", help="prepare, impute, classify, analyze, temporal, protocol, all")
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--data", default=None, help="Raw CSV path")
     parser.add_argument("--imputer", default=None, help="Filter to one imputer")
@@ -154,6 +156,11 @@ def main():
         default=None,
         help="Max train samples for tuning in hybrid mode (default: 20000)",
     )
+    # Protocol flags
+    parser.add_argument("--dry-run", action="store_true", help="Quick protocol validation run")
+    parser.add_argument("--repeats", type=int, default=None, help="Override protocol repeats")
+    parser.add_argument("--protocol-imputer", default=None, help="Comma-separated imputer filter for protocol")
+    parser.add_argument("--protocol-classifier", default=None, help="Comma-separated classifier filter for protocol")
     args = parser.parse_args()
 
     log = setup_logging()
@@ -218,12 +225,6 @@ def main():
             cfg=cfg,
         )
 
-    if run_all or "analyze" in steps:
-        log.info("STEP 4 - ANALYZE")
-        from src.run_analysis import run_analysis
-
-        run_analysis(args.config, cfg=cfg)
-
     if run_all or "temporal" in steps:
         log.info("STEP 5 - TEMPORAL SENSITIVITY")
         from src.run_temporal_sensitivity import run_temporal_sensitivity
@@ -237,6 +238,60 @@ def main():
             filter_classifiers=filter_classifiers,
             runtime_mode=args.runtime_mode,
         )
+
+    if run_all or "analyze" in steps:
+        log.info("STEP 4 - ANALYZE")
+        from src.run_analysis import run_analysis
+
+        run_analysis(args.config, cfg=cfg)
+
+    if "protocol" in steps:
+        log.info("STEP 6 - CONFIRMATORY PROTOCOL")
+        from src.run_protocol import run_protocol
+        from src.run_protocol_stats import run_protocol_stats
+
+        n_sample_proto = args.n_sample
+        repeats_proto = args.repeats
+        if args.dry_run:
+            n_sample_proto = n_sample_proto or 2000
+            repeats_proto = repeats_proto or 1
+            log.info("Protocol DRY-RUN: n_sample=%d, repeats=%d", n_sample_proto, repeats_proto)
+
+        proto_imputers = args.protocol_imputer.split(",") if args.protocol_imputer else None
+        proto_classifiers = args.protocol_classifier.split(",") if args.protocol_classifier else None
+
+        run_protocol(
+            config_path=args.config,
+            cfg=cfg,
+            dry_run=args.dry_run,
+            n_sample=n_sample_proto,
+            repeats=repeats_proto,
+            filter_imputers=proto_imputers,
+            filter_classifiers=proto_classifiers,
+        )
+
+        log.info("Protocol experiment complete — running statistical analysis...")
+        best_path = run_protocol_stats(config_path=args.config, cfg=cfg)
+
+        # P5/A3: chain temporal holdout using the structured best_method.json
+        if best_path and best_path.exists():
+            import json as _json
+            best = _json.loads(best_path.read_text(encoding="utf-8"))
+            best_imputer = best.get("imputer")
+            if best_imputer:
+                log.info("Best imputer selected: %s — running temporal holdout.", best_imputer)
+                from src.run_temporal_sensitivity import run_temporal_sensitivity
+                run_temporal_sensitivity(
+                    config_path=args.config,
+                    cfg=cfg,
+                    filter_imputers=[best_imputer],
+                    runtime_mode=args.runtime_mode,
+                )
+            else:
+                log.info(
+                    "No imputer passed the confirmatory criteria — temporal holdout skipped. "
+                    "See %s for details.", best_path
+                )
 
     log.info("Completed at: %s", datetime.now().isoformat())
 

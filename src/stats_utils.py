@@ -169,6 +169,41 @@ def holm_adjust(pvalues: np.ndarray) -> np.ndarray:
     return adjusted
 
 
+def permutation_test_paired(
+    a: np.ndarray,
+    b: np.ndarray,
+    n_perms: int = 10000,
+    seed: int = 42,
+) -> Tuple[float, float]:
+    """Two-sided paired permutation test.
+
+    Under H0 the treatment labels are exchangeable within each pair.
+    We randomly flip the sign of each paired difference ``n_perms`` times
+    and compare the observed mean difference to the null distribution.
+
+    Returns (observed_mean_diff, two_sided_p_value).
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if len(a) != len(b) or len(a) == 0:
+        return (np.nan, np.nan)
+
+    diff = a - b
+    n = len(diff)
+    observed = float(np.mean(diff))
+
+    rng = np.random.default_rng(seed)
+    # (n_perms, n) matrix of random signs: +1 or -1
+    signs = rng.choice([-1, 1], size=(n_perms, n))
+    perm_means = (signs * diff[None, :]).mean(axis=1)
+
+    # Two-sided p-value: proportion of permutation means at least as extreme
+    p_value = float(np.mean(np.abs(perm_means) >= np.abs(observed)))
+    # Ensure p >= 1/n_perms (cannot be exactly 0)
+    p_value = max(p_value, 1.0 / n_perms)
+    return (observed, p_value)
+
+
 def fmt_time(seconds: float) -> str:
     """Format elapsed time as human-readable string."""
     if seconds < 60:
@@ -176,3 +211,4 @@ def fmt_time(seconds: float) -> str:
     if seconds < 3600:
         return f"{seconds / 60:.1f}min"
     return f"{seconds / 3600:.1f}h"
+

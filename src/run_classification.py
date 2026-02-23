@@ -791,9 +791,10 @@ def _manual_random_search(estimator, param_distributions, n_iter, cv, scoring, X
     return best_estimator, best_params, best_score
 
 
-def _save_classification_checkpoint(ckpt_path, completed, all_results):
+def _save_classification_checkpoint(ckpt_path, completed, all_results, n_sample):
     payload = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "n_sample": n_sample,
         "completed": sorted(completed),
         "results": _serialize(all_results),
     }
@@ -1133,10 +1134,16 @@ def run_classification(
         with open(ckpt_path, "r", encoding="utf-8") as f:
             ckpt = json.load(f)
 
-        if ckpt.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        current_n_sample = cfg["experiment"].get("n_sample")
+        ckpt_n_sample = ckpt.get("n_sample")
+
+        if ckpt.get("schema_version") != CHECKPOINT_SCHEMA_VERSION or ckpt_n_sample != current_n_sample:
             log.warning(
-                "Checkpoint schema mismatch (%s). Ignoring old checkpoint and starting fresh.",
+                "Checkpoint invalid (schema %s vs %s, or n_sample %s vs %s). Starting fresh.",
                 ckpt.get("schema_version"),
+                CHECKPOINT_SCHEMA_VERSION,
+                ckpt_n_sample,
+                current_n_sample,
             )
             completed = set()
             all_results = []
@@ -1290,7 +1297,7 @@ def run_classification(
         all_results.append(result)
         completed.add(key)
         pbar.update(1)
-        _save_classification_checkpoint(ckpt_path, completed, all_results)
+        _save_classification_checkpoint(ckpt_path, completed, all_results, cfg["experiment"].get("n_sample"))
         gc.collect()
 
     pbar.close()
