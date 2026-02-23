@@ -37,4 +37,5 @@ __pycache__/
 results/raw/
 results/tables/
 legacy_scripts/
+tests/
 # Allow results/figures/ (since .png is whitelisted globally, but figures dir must be traversable)
