@@ -127,11 +127,52 @@ Linhas = classe real, colunas = classe predita.
  3756  6202  4516  6572 14929 193543
 ```
 
+## Figuras geradas nesta rodada
+
+Arquivos de figura com timestamp `2026-02-23 13:00 -0300` em `results/figures/`.
+
+### Missing por variavel
+
+![Missing rates](results/figures/missing_rates.png)
+
+### Heatmaps de metricas
+
+![Heatmap Accuracy](results/figures/heatmap_accuracy.png)
+
+![Heatmap F1 Weighted](results/figures/heatmap_f1_weighted.png)
+
+![Heatmap F1 Macro](results/figures/heatmap_f1_macro.png)
+
+![Heatmap AUC Weighted](results/figures/heatmap_auc_weighted.png)
+
+![Heatmap Recall Weighted](results/figures/heatmap_recall_weighted.png)
+
+### Boxplots das metricas
+
+![Boxplots Metrics](results/figures/boxplots_metrics.png)
+
+### Matriz de confusao do melhor modelo
+
+![Confusion Matrix Best](results/figures/confusion_matrix_best.png)
+
+### F1 por classe
+
+![Per Class F1](results/figures/per_class_f1.png)
+
+### Radar comparativo
+
+![Radar Best](results/figures/radar_best.png)
+
+### Tempo por etapa
+
+![Timing Stacked](results/figures/timing_stacked.png)
+
 ## Artefatos no escopo
 
 - `results/raw/all_results_detailed_hybrid.json` (fonte unica deste README)
 - `results/raw/all_results_hybrid.csv` (se gerado na mesma execucao)
 - `results/raw/checkpoint_classification_hybrid.json` (progresso da etapa de classificacao)
+- `results/figures/*.png` e `results/figures/*.pdf` gerados nesta rodada
 
 ## Observacao
 
