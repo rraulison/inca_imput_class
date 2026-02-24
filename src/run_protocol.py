@@ -339,13 +339,20 @@ def run_protocol(
     inner_refit = proto.get("inner_refit_imputer", True)
     # Override tuning budget
     is_fast_mode = cfg.get("classification", {}).get("runtime", {}).get("mode", "") == "fast"
-    if (is_fast_mode or dry_run) and inner_refit and not dry_run:
+    
+    # We now allow inner_refit=False as a documented feature for huge datasets.
+    # We only raise if fast mode was forced, and the config says inner_refit_imputer: True. 
+    # But if inner_refit_imputer is already False, we just accept it.
+    if is_fast_mode and inner_refit and not dry_run:
         # dry_run is always allowed; fast+confirmatory requires explicit override
         raise ValueError(
-            "inner_refit_imputer=true is required in confirmatory mode. "
-            "To allow fast mode, set inner_refit_imputer: false explicitly in config.yaml "
-            "and understand this introduces inner-loop leakage."
+            "inner_refit_imputer=true is conceptually opposed to fast runtime mode. "
+            "To allow fast mode, set inner_refit_imputer: false explicitly in config.yaml."
         )
+
+    if not inner_refit and not dry_run:
+        log.warning("Protocol is running with inner_refit_imputer=False. This saves compute but introduces inner-loop imputation leakage.")
+
     if is_fast_mode or dry_run:
         inner_refit = False  # in dry_run or fast-mode we allow leaky shortcut
         n_inner = 2

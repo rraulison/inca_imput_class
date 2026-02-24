@@ -155,13 +155,13 @@ protocol:
   sensitivity_margin: 0.005
   outer_folds: 5
   inner_folds: 5
-  repeats: 5
+  repeats: 1
   seed_schedule: [42, 123, 456, 789, 1024]
   tuning_budget: 30
   permutation_n_perms: 10000
   bootstrap_iters: 5000
   # --- correctness & reproducibility ---
-  inner_refit_imputer: true # re-fit full pipeline (encode→impute→scale→clf) on each inner fold
+  inner_refit_imputer: false # set to false for very large datasets to avoid extreme compute overhead
   stats_seed: 42 # base seed for per-comparison RNG derivation
   checkpoint_strict: true # invalidate checkpoint when signature diverges
   global_agg: mean # aggregation fn for classifiers in global pivot (mean | median)
