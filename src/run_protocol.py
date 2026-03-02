@@ -36,6 +36,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 # ── project imports ───────────────────────────────────────────────────
 try:
@@ -397,6 +398,8 @@ def run_protocol(
     done_count = len(completed)
     log.info("Total combinations: %d | Already completed: %d", total_combos, done_count)
 
+    pbar = tqdm(total=total_combos, initial=done_count, desc="Protocol Progress", leave=True)
+
     for rep_idx, seed in enumerate(seed_schedule):
         log.info("═══ Repeat %d/%d (seed=%d) ═══", rep_idx + 1, n_repeats, seed)
         skf = StratifiedKFold(n_splits=n_outer, shuffle=True, random_state=seed)
@@ -531,6 +534,8 @@ def run_protocol(
                             "seed": seed, "error": str(e),
                         })
                         completed.add(key)
+                        
+                    pbar.update(1)
 
                     # Save checkpoint after each combination
                     _save_checkpoint(ckpt_path, completed, all_results, current_sig)
@@ -541,6 +546,8 @@ def run_protocol(
 
             del X_tr_raw, X_te_raw, X_te_enc, fold_imputers
             gc.collect()
+
+    pbar.close()
 
     # ── Persist splits ──
     splits_path = res_dir / "protocol_splits.pkl"
